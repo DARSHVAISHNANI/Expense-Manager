@@ -14,6 +14,7 @@ const allowedUserId = parseInt(process.env.ALLOWED_TELEGRAM_USER_ID, 10);
 const bot = new TelegramBot(token, { polling: true });
 
 // --- IN-MEMORY STORAGE FOR GOALS ---
+// Replace your userConfig at the top of the file:
 let userConfig = {
   income: 0,
   rentLimit: 0,
@@ -22,6 +23,8 @@ let userConfig = {
   foodLimit: 0,
   billsLimit: 0,
   travelLimit: 0,
+  hdfcInit: 0,    // NEW: Opening Balance
+  sbiInit: 0,     // NEW: Opening Balance
   savingsTarget: 0
 };
 
@@ -95,6 +98,7 @@ export function startBot() {
         return bot.sendMessage(msg.chat.id, "❌ Please enter a valid number without text.");
       }
 
+      // Replace the entire switch statement inside the bot.on('message') block:
       switch (setupStep) {
         case 1:
           userConfig.income = value;
@@ -111,20 +115,28 @@ export function startBot() {
         case 4:
           userConfig.groceriesLimit = value;
           setupStep = 5;
-          return bot.sendMessage(msg.chat.id, "✅ **Question 5:** What is your Food (Eating out/Snacks) limit?");
+          return bot.sendMessage(msg.chat.id, "✅ **Question 5:** What is your Food (Eating out) limit?");
         case 5:
           userConfig.foodLimit = value;
           setupStep = 6;
-          return bot.sendMessage(msg.chat.id, "✅ **Question 6:** What is your limit for Other Bills (Internet, Water, etc.)?");
+          return bot.sendMessage(msg.chat.id, "✅ **Question 6:** What is your limit for Other Bills?");
         case 6:
           userConfig.billsLimit = value;
           setupStep = 7;
-          return bot.sendMessage(msg.chat.id, "✅ **Question 7:** What is your Travel/Transportation limit?");
+          return bot.sendMessage(msg.chat.id, "✅ **Question 7:** What is your Travel limit?");
         case 7:
           userConfig.travelLimit = value;
           setupStep = 8;
-          return bot.sendMessage(msg.chat.id, "✅ **Final Question:** What is your ultimate Savings Target for this month?");
+          return bot.sendMessage(msg.chat.id, "✅ **Question 8:** What is your CURRENT balance in your HDFC account?");
         case 8:
+          userConfig.hdfcInit = value;
+          setupStep = 9;
+          return bot.sendMessage(msg.chat.id, "✅ **Question 9:** What is your CURRENT balance in your SBI account?");
+        case 9:
+          userConfig.sbiInit = value;
+          setupStep = 10;
+          return bot.sendMessage(msg.chat.id, "✅ **Final Question:** What is your ultimate Savings Target for this month?");
+        case 10:
           userConfig.savingsTarget = value;
           setupStep = 0; // Exit setup mode
           return bot.sendMessage(msg.chat.id, `🎉 Setup Complete! Type /summary to see your detailed budget dashboard.`);
