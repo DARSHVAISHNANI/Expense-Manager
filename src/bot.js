@@ -14,7 +14,6 @@ const allowedUserId = parseInt(process.env.ALLOWED_TELEGRAM_USER_ID, 10);
 const bot = new TelegramBot(token, { polling: true });
 
 // --- IN-MEMORY STORAGE FOR GOALS ---
-// Replace your userConfig at the top of the file:
 let userConfig = {
   income: 0,
   rentLimit: 0,
@@ -23,10 +22,10 @@ let userConfig = {
   foodLimit: 0,
   billsLimit: 0,
   travelLimit: 0,
-  hdfcInit: 0,    // NEW: Opening Balance
-  sbiInit: 0,     // NEW: Opening Balance
-  savingsTarget: 0,
-    cashInit: 0,
+  hdfcInit: 0,    // Opening Balance
+  sbiInit: 0,     // Opening Balance
+  cashInit: 0,    // Opening Balance
+  savingsTarget: 0
 };
 
 // Tracks where the user is in the setup process (0 = not in setup)
@@ -55,7 +54,7 @@ export function startBot() {
   // --- COMMAND: /help ---
   bot.onText(/^\/help$/, (msg) => {
     if (!isAllowed(msg)) return;
-    const helpText = `💡 **Examples to try:**\n\n- "600 travel hdfc upi"\n- "spent 1200 on groceries cash"\n- "received 5000 salary"\n- "120 maggi food"\n\nOr simply send a voice note saying the same!`;
+    const helpText = `💡 **Examples to try:**\n\n- "600 travel hdfc"\n- "spent 1200 on groceries cash"\n- "received 5000 salary"\n- "120 maggi food"\n- "transfer 500 from hdfc to cash"\n\nOr simply send a voice note saying the same!`;
     bot.sendMessage(msg.chat.id, helpText, { parse_mode: 'Markdown' });
   });
 
@@ -91,7 +90,7 @@ export function startBot() {
     // We only care about text or voice
     if (!msg.text && !msg.voice) return;
 
-    // 2. Replace the SETUP WIZARD LOGIC inside bot.on('message') with this:
+    // --- SETUP WIZARD LOGIC ---
     if (setupStep > 0 && msg.text) {
       const value = parseInt(msg.text.replace(/,/g, ''), 10);
 
@@ -99,7 +98,6 @@ export function startBot() {
         return bot.sendMessage(msg.chat.id, "❌ Please enter a valid number without text.");
       }
 
-      // Replace the entire switch statement inside the bot.on('message') block:
       switch (setupStep) {
         case 1:
           userConfig.income = value;
@@ -146,6 +144,7 @@ export function startBot() {
           setupStep = 0; // Exit setup mode
           return bot.sendMessage(msg.chat.id, `🎉 Setup Complete! Type /summary to see your detailed budget dashboard.`);
       }
+    } // <-- This was the bracket that went missing!
 
     // --- NORMAL EXPENSE TRACKING LOGIC ---
     try {
