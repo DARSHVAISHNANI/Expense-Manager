@@ -51,13 +51,13 @@ export function formatSummaryOnly(summary, month, year, userConfig = {}) {
   // 1. ALWAYS SHOW LIVE BALANCES (Opening Balance + Notion Transactions)
   const hdfcLive = (userConfig.hdfcInit || 0) + (summary.accountBalances?.['HDFC'] || 0);
   const sbiLive = (userConfig.sbiInit || 0) + (summary.accountBalances?.['SBI'] || 0);
-  const cashLive = summary.accountBalances?.['Cash'] || 0; // Cash starts at 0
+  const cashLive = (userConfig.cashInit || 0) + (summary.accountBalances?.['Cash'] || 0);
 
   text += `━━━━━━━━━━━━━━━━━━━━\n`;
   text += `🏦 Live Balances:\n`;
   text += `💳 HDFC: ${formatCurrency(hdfcLive)}\n`;
   text += `🏛️ SBI: ${formatCurrency(sbiLive)}\n`;
-  text += `📱 Cash: ${formatCurrency(cashLive)}\n`;
+  text += `💵 Cash: ${formatCurrency(cashLive)}\n`;
 
   // 2. ONLY SHOW SAVINGS GOAL IF SET
   if (userConfig.savingsTarget > 0) {

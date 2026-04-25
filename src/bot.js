@@ -25,7 +25,8 @@ let userConfig = {
   travelLimit: 0,
   hdfcInit: 0,    // NEW: Opening Balance
   sbiInit: 0,     // NEW: Opening Balance
-  savingsTarget: 0
+  savingsTarget: 0,
+    cashInit: 0,
 };
 
 // Tracks where the user is in the setup process (0 = not in setup)
@@ -135,13 +136,16 @@ export function startBot() {
         case 9:
           userConfig.sbiInit = value;
           setupStep = 10;
-          return bot.sendMessage(msg.chat.id, "✅ **Final Question:** What is your ultimate Savings Target for this month?");
+          return bot.sendMessage(msg.chat.id, "✅ **Question 10:** What is your CURRENT balance in Cash?");
         case 10:
+          userConfig.cashInit = value;
+          setupStep = 11;
+          return bot.sendMessage(msg.chat.id, "✅ **Final Question:** What is your ultimate Savings Target for this month?");
+        case 11:
           userConfig.savingsTarget = value;
           setupStep = 0; // Exit setup mode
           return bot.sendMessage(msg.chat.id, `🎉 Setup Complete! Type /summary to see your detailed budget dashboard.`);
       }
-    }
 
     // --- NORMAL EXPENSE TRACKING LOGIC ---
     try {
