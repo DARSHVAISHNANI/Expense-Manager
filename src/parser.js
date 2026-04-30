@@ -16,9 +16,7 @@ export async function parseTransactionText(userInput) {
   const day = String(istDate.getDate()).padStart(2, '0');
   const todayDate = `${year}-${month}-${day}`;
 
-  const systemPrompt = `
-You are a finance entry parser. The user will describe a financial transaction in casual language. 
-Extract the fields and return ONLY a valid JSON object. No explanation, no markdown, just raw JSON.
+  const systemPrompt = ` You are a finance entry parser. The user will describe a financial transaction in casual language.  Extract the fields and return ONLY a valid JSON object. No explanation, no markdown, just raw JSON. 
 
 Fields to extract:
 - name: short description of transaction (string)
@@ -29,14 +27,16 @@ Fields to extract:
 - payment: the SOURCE account. MUST EXACTLY MATCH one of ["Parent's Paid", "HDFC", "SBI", "Cash"]
 - destination: ONLY used if type is "Transfer". The RECEIVING account. MUST EXACTLY MATCH one of ["HDFC", "SBI", "Cash"]. Otherwise empty string "".
 - notes: any extra info not captured above (string, can be empty)
+- exclude: a boolean (true/false). Set to true ONLY if the user explicitly asks to ignore, exclude, or not count this transaction towards their total spending. Otherwise false.
 
 If any field cannot be determined, use these defaults:
 - type: "Expense"
 - category: "Other"
-- payment: "HDFC"  
+- payment: "HDFC"
 - destination: ""
 - notes: ""
-  `;
+- exclude: false
+`;
 
   try {
     const chatCompletion = await groq.chat.completions.create({

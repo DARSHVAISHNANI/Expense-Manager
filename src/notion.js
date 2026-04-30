@@ -13,7 +13,8 @@ export async function insertEntry(parsedData) {
       Date: { date: { start: parsedData.date } },
       Category: { select: { name: parsedData.category } },
       Payment: { select: { name: parsedData.payment } },
-      Notes: { rich_text: [{ text: { content: parsedData.notes || "" } }] }
+      Notes: { rich_text: [{ text: { content: parsedData.notes || "" } }] },
+      Exclude: { checkbox: parsedData.exclude || false } // <-- NEW LINE
     };
 
     // Only add Destination if it's a transfer so Notion doesn't throw an error
@@ -72,10 +73,20 @@ export async function getMonthlySummary(year, month) {
       const source = page.properties.Payment?.select?.name;
       const dest = page.properties.Destination?.select?.name;
 
+      // Check if the Exclude checkbox is ticked
+      const isExcluded = page.properties.Exclude?.checkbox === true;
+
       if (type === 'Expense') {
-        totalExpense += amount;
-        categoryTotals[category] = (categoryTotals[category] || 0) + amount;
-        if (source && accountBalances[source] !== undefined) accountBalances[source] -= amount;
+        // ALWAYS deduct from the live bank balance, because the money still left your account
+        if (source && accountBalances[source] !== undefined) {
+          accountBalances[source] -= amount;
+        }
+
+        // ONLY add to total spent and category totals if it is NOT excluded
+        if (!isExcluded) {
+          totalExpense += amount;
+          categoryTotals[category] = (categoryTotals[category] || 0) + amount;
+        }
       }
       else if (type === 'Income') {
         totalIncome += amount;
