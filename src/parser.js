@@ -17,7 +17,6 @@ export async function parseTransactionText(userInput) {
   const todayDate = `${year}-${month}-${day}`;
 
   const systemPrompt = ` You are a finance entry parser. The user will describe a financial transaction in casual language.  Extract the fields and return ONLY a valid JSON object. No explanation, no markdown, just raw JSON. 
-
 Fields to extract:
 - name: short description of transaction (string)
 - type: MUST be "Income", "Expense", or "Transfer"

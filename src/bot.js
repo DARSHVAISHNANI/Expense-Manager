@@ -4,7 +4,7 @@ import 'dotenv/config';
 
 import { parseTransactionText } from './parser.js';
 import { transcribeAudio } from './transcriber.js';
-import { insertEntry, getMonthlySummary } from './notion.js';
+import { insertEntry, getDateRangeSummary } from './notion.js';
 import { formatAddedEntry, formatSummaryOnly, formatError } from './formatter.js';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -15,6 +15,8 @@ const bot = new TelegramBot(token, { polling: true });
 
 // --- IN-MEMORY STORAGE FOR GOALS ---
 let userConfig = {
+  startDate: '',  // NEW: Stores the custom start date
+  endDate: '',    // NEW: Stores the custom end date
   income: 0,
   rentLimit: 0,
   electricityLimit: 0,
@@ -22,9 +24,9 @@ let userConfig = {
   foodLimit: 0,
   billsLimit: 0,
   travelLimit: 0,
-  hdfcInit: 0,    // Opening Balance
-  sbiInit: 0,     // Opening Balance
-  cashInit: 0,    // Opening Balance
+  hdfcInit: 0,
+  sbiInit: 0,
+  cashInit: 0,
   savingsTarget: 0
 };
 
@@ -47,7 +49,7 @@ export function startBot() {
   // --- COMMAND: /start ---
   bot.onText(/^\/start$/, (msg) => {
     if (!isAllowed(msg)) return;
-    const welcomeText = `👋 Welcome to your Finance Tracker!\n\nJust type or send a voice note like:\n"spent 600 on travel to Ahmedabad, parent's paid"\n\nCommands:\n/setup - Set your monthly targets\n/summary - View this month's stats\n/help - View formatting examples`;
+    const welcomeText = `👋 Welcome to your Finance Tracker!\n\nJust type or send a voice note like:\n"spent 600 on travel to Ahmedabad, parent's paid"\n\nCommands:\n/setup - Set your monthly cycle and targets\n/summary - View this cycle's stats\n/help - View formatting examples`;
     bot.sendMessage(msg.chat.id, welcomeText);
   });
 
@@ -62,89 +64,138 @@ export function startBot() {
   bot.onText(/^\/setup$/, (msg) => {
     if (!isAllowed(msg)) return;
     setupStep = 1; // Start the wizard
-    bot.sendMessage(msg.chat.id, "🛠️ Let's set up your Goals for this month!\n\n**Question 1:** What is your expected total Monthly Income? (Just type a number, e.g., 50000)");
+    bot.sendMessage(msg.chat.id, "🛠️ Let's set up your custom billing cycle and Goals!\n\n**Question 1:** What is the START DATE for your cycle? (Format: YYYY-MM-DD, e.g., 2026-04-24)");
   });
 
   // --- COMMAND: /summary ---
-  bot.onText(/^\/summary$/, async (msg) => {
+  bot.onText(/^\/summary(?:\s+(.+))?$/, async (msg, match) => {
     if (!isAllowed(msg)) return;
+
     try {
       bot.sendChatAction(msg.chat.id, 'typing');
 
-      // Get current dynamic month and year
-      const now = new Date();
-      const summary = await getMonthlySummary(now.getFullYear(), now.getMonth() + 1);
+      let startDate, endDate, displayTitle;
+      const args = match[1]?.trim();
 
-      bot.sendMessage(msg.chat.id, formatSummaryOnly(summary, now.getMonth() + 1, now.getFullYear(), userConfig));
+      // 1. IF USER PROVIDED DATES MANUALLY (e.g. "/summary 2026-04-15 2026-05-15")
+      if (args) {
+        const dates = args.split(' ');
+        if (dates.length !== 2) {
+          return bot.sendMessage(msg.chat.id, "❌ Format: /summary YYYY-MM-DD YYYY-MM-DD");
+        }
+        startDate = dates[0];
+        endDate = dates[1];
+        displayTitle = `${startDate} to ${endDate} Summary`;
+      }
+      // 2. NEW: IF USER HAS SAVED DATES IN SETUP, USE THOSE
+      else if (userConfig.startDate && userConfig.endDate) {
+        startDate = userConfig.startDate;
+        endDate = userConfig.endDate;
+        displayTitle = `${startDate} to ${endDate} Summary`;
+      }
+      // 3. FALLBACK: IF NO SAVED DATES, DEFAULT TO CURRENT CALENDAR MONTH
+      else {
+        const nowIST = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+        const year = nowIST.getFullYear();
+        const month = String(nowIST.getMonth() + 1).padStart(2, '0');
+        const lastDay = new Date(year, nowIST.getMonth() + 1, 0).getDate();
+
+        startDate = `${year}-${month}-01`;
+        endDate = `${year}-${month}-${lastDay}`;
+        displayTitle = nowIST.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) + " Summary";
+      }
+
+      // Fetch the data and format it!
+      const summary = await getDateRangeSummary(startDate, endDate);
+      bot.sendMessage(msg.chat.id, formatSummaryOnly(summary, displayTitle, userConfig));
+
     } catch (error) {
-      bot.sendMessage(msg.chat.id, formatError('Failed to fetch summary.'));
+      bot.sendMessage(msg.chat.id, formatError('Failed to fetch summary. Check your dates!'));
     }
   });
 
   // --- HANDLE ALL OTHER MESSAGES (Text & Voice) ---
   bot.on('message', async (msg) => {
-    // Ignore commands, they are handled above
     if (msg.text && msg.text.startsWith('/')) return;
     if (!isAllowed(msg)) return;
-
-    // We only care about text or voice
     if (!msg.text && !msg.voice) return;
 
     // --- SETUP WIZARD LOGIC ---
     if (setupStep > 0 && msg.text) {
-      const value = parseInt(msg.text.replace(/,/g, ''), 10);
+      const textVal = msg.text.trim();
 
-      if (isNaN(value)) {
-        return bot.sendMessage(msg.chat.id, "❌ Please enter a valid number without text.");
-      }
+      // NEW: Special date validation for Questions 1 and 2
+      if (setupStep === 1 || setupStep === 2) {
+        const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+        if (!dateRegex.test(textVal)) {
+          return bot.sendMessage(msg.chat.id, "❌ Please enter a valid date exactly in YYYY-MM-DD format.");
+        }
 
-      switch (setupStep) {
-        case 1:
-          userConfig.income = value;
+        if (setupStep === 1) {
+          userConfig.startDate = textVal;
           setupStep = 2;
-          return bot.sendMessage(msg.chat.id, "✅ **Question 2:** What is your Rent limit?");
-        case 2:
-          userConfig.rentLimit = value;
+          return bot.sendMessage(msg.chat.id, "✅ **Question 2:** What is the END DATE for your cycle? (Format: YYYY-MM-DD)");
+        } else if (setupStep === 2) {
+          userConfig.endDate = textVal;
           setupStep = 3;
-          return bot.sendMessage(msg.chat.id, "✅ **Question 3:** What is your Electricity limit?");
-        case 3:
-          userConfig.electricityLimit = value;
-          setupStep = 4;
-          return bot.sendMessage(msg.chat.id, "✅ **Question 4:** What is your Groceries limit?");
-        case 4:
-          userConfig.groceriesLimit = value;
-          setupStep = 5;
-          return bot.sendMessage(msg.chat.id, "✅ **Question 5:** What is your Food (Eating out) limit?");
-        case 5:
-          userConfig.foodLimit = value;
-          setupStep = 6;
-          return bot.sendMessage(msg.chat.id, "✅ **Question 6:** What is your limit for Other Bills?");
-        case 6:
-          userConfig.billsLimit = value;
-          setupStep = 7;
-          return bot.sendMessage(msg.chat.id, "✅ **Question 7:** What is your Travel limit?");
-        case 7:
-          userConfig.travelLimit = value;
-          setupStep = 8;
-          return bot.sendMessage(msg.chat.id, "✅ **Question 8:** What is your CURRENT balance in your HDFC account?");
-        case 8:
-          userConfig.hdfcInit = value;
-          setupStep = 9;
-          return bot.sendMessage(msg.chat.id, "✅ **Question 9:** What is your CURRENT balance in your SBI account?");
-        case 9:
-          userConfig.sbiInit = value;
-          setupStep = 10;
-          return bot.sendMessage(msg.chat.id, "✅ **Question 10:** What is your CURRENT balance in Cash?");
-        case 10:
-          userConfig.cashInit = value;
-          setupStep = 11;
-          return bot.sendMessage(msg.chat.id, "✅ **Final Question:** What is your ultimate Savings Target for this month?");
-        case 11:
-          userConfig.savingsTarget = value;
-          setupStep = 0; // Exit setup mode
-          return bot.sendMessage(msg.chat.id, `🎉 Setup Complete! Type /summary to see your detailed budget dashboard.`);
+          return bot.sendMessage(msg.chat.id, "✅ **Question 3:** What is your expected total Monthly Income? (Just type a number)");
+        }
       }
-    } // <-- This was the bracket that went missing!
+      // Normal number validation for the rest of the questions
+      else {
+        const value = parseInt(textVal.replace(/,/g, ''), 10);
+        if (isNaN(value)) {
+          return bot.sendMessage(msg.chat.id, "❌ Please enter a valid number without text.");
+        }
+
+        switch (setupStep) {
+          case 3:
+            userConfig.income = value;
+            setupStep = 4;
+            return bot.sendMessage(msg.chat.id, "✅ **Question 4:** What is your Rent limit?");
+          case 4:
+            userConfig.rentLimit = value;
+            setupStep = 5;
+            return bot.sendMessage(msg.chat.id, "✅ **Question 5:** What is your Electricity limit?");
+          case 5:
+            userConfig.electricityLimit = value;
+            setupStep = 6;
+            return bot.sendMessage(msg.chat.id, "✅ **Question 6:** What is your Groceries limit?");
+          case 6:
+            userConfig.groceriesLimit = value;
+            setupStep = 7;
+            return bot.sendMessage(msg.chat.id, "✅ **Question 7:** What is your Food (Eating out) limit?");
+          case 7:
+            userConfig.foodLimit = value;
+            setupStep = 8;
+            return bot.sendMessage(msg.chat.id, "✅ **Question 8:** What is your limit for Other Bills?");
+          case 8:
+            userConfig.billsLimit = value;
+            setupStep = 9;
+            return bot.sendMessage(msg.chat.id, "✅ **Question 9:** What is your Travel limit?");
+          case 9:
+            userConfig.travelLimit = value;
+            setupStep = 10;
+            return bot.sendMessage(msg.chat.id, "✅ **Question 10:** What is your CURRENT balance in your HDFC account? (On your Start Date)");
+          case 10:
+            userConfig.hdfcInit = value;
+            setupStep = 11;
+            return bot.sendMessage(msg.chat.id, "✅ **Question 11:** What is your CURRENT balance in your SBI account? (On your Start Date)");
+          case 11:
+            userConfig.sbiInit = value;
+            setupStep = 12;
+            return bot.sendMessage(msg.chat.id, "✅ **Question 12:** What is your CURRENT balance in Cash? (On your Start Date)");
+          case 12:
+            userConfig.cashInit = value;
+            setupStep = 13;
+            return bot.sendMessage(msg.chat.id, "✅ **Final Question:** What is your ultimate Savings Target for this cycle?");
+          case 13:
+            userConfig.savingsTarget = value;
+            setupStep = 0; // Exit setup mode
+            return bot.sendMessage(msg.chat.id, `🎉 Setup Complete! Your cycle is set from ${userConfig.startDate} to ${userConfig.endDate}. Type /summary to see your dashboard.`);
+        }
+      }
+    } // End of setup wizard
 
     // --- NORMAL EXPENSE TRACKING LOGIC ---
     try {
@@ -153,14 +204,9 @@ export function startBot() {
 
       // If it's a voice note, download and transcribe it first
       if (msg.voice) {
-        // 1. Get file link from Telegram
         const fileLink = await bot.getFileLink(msg.voice.file_id);
-
-        // 2. Download the audio file into a Buffer
         const response = await fetch(fileLink);
         const audioBuffer = await response.arrayBuffer();
-
-        // 3. Transcribe with Groq Whisper
         textToParse = await transcribeAudio(Buffer.from(audioBuffer));
         console.log(`🎙️ Transcribed: "${textToParse}"`);
       }
@@ -171,14 +217,31 @@ export function startBot() {
       // 5. Insert into Notion
       await insertEntry(parsedData);
 
-      // 6. Wait 300ms to avoid Notion rate limits
-      await new Promise(resolve => setTimeout(resolve, 300));
+      // 6. Wait 2500ms to give Notion time to index the new entry
+      await new Promise(resolve => setTimeout(resolve, 2500));
 
-      // Get current dynamic month based on the parsed entry
-      const now = new Date(parsedData.date);
-      const summary = await getMonthlySummary(now.getFullYear(), now.getMonth() + 1);
+      // 7. NEW: Check if user has custom dates set, otherwise fallback to current month
+      let startDate, endDate, displayTitle;
+      if (userConfig.startDate && userConfig.endDate) {
+        startDate = userConfig.startDate;
+        endDate = userConfig.endDate;
+        displayTitle = `${startDate} to ${endDate} Summary`;
+      } else {
+        const nowIST = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+        const year = nowIST.getFullYear();
+        const month = String(nowIST.getMonth() + 1).padStart(2, '0');
+        const lastDay = new Date(year, nowIST.getMonth() + 1, 0).getDate();
 
-      bot.sendMessage(msg.chat.id, formatAddedEntry(parsedData, summary, userConfig));
+        startDate = `${year}-${month}-01`;
+        endDate = `${year}-${month}-${lastDay}`;
+        displayTitle = nowIST.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) + " Summary";
+      }
+
+      // 8. Fetch the newly updated summary data
+      const summary = await getDateRangeSummary(startDate, endDate);
+
+      // 9. Send the success message!
+      bot.sendMessage(msg.chat.id, formatAddedEntry(parsedData, summary, displayTitle, userConfig));
 
     } catch (error) {
       bot.sendMessage(msg.chat.id, formatError(error.message));

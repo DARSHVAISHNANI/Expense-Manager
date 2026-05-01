@@ -19,7 +19,7 @@ export async function transcribeAudio(audioBuffer) {
       file: audioFile,
       model: 'whisper-large-v3',
       // We purposefully do NOT set a 'language' parameter here.
-      // This allows Whisper to automatically detect and transcribe a mix of Hindi and English!
+      // This allows    Whisper to automatically detect and transcribe a mix of Hindi and English!
       response_format: 'json',
       temperature: 0.0
     });

@@ -32,13 +32,9 @@ export async function insertEntry(parsedData) {
   }
 }
 
-export async function getMonthlySummary(year, month) {
+// Replace getMonthlySummary in notion.js with this:
+export async function getDateRangeSummary(startDate, endDate) {
   try {
-    const paddedMonth = String(month).padStart(2, '0');
-    const startDate = `${year}-${paddedMonth}-01`;
-    const lastDay = new Date(year, month, 0).getDate();
-    const endDate = `${year}-${paddedMonth}-${lastDay}`;
-
     let results = [];
     let hasMore = true;
     let nextCursor = undefined;
@@ -49,6 +45,7 @@ export async function getMonthlySummary(year, month) {
         start_cursor: nextCursor,
         filter: {
           and: [
+            // Look exactly between the two dates the user provides
             { property: 'Date', date: { on_or_after: startDate } },
             { property: 'Date', date: { on_or_before: endDate } }
           ]
@@ -62,8 +59,6 @@ export async function getMonthlySummary(year, month) {
     let totalExpense = 0;
     let totalIncome = 0;
     let categoryTotals = {};
-
-    // New object to track individual bank balances
     let accountBalances = { "HDFC": 0, "SBI": 0, "Parent's Paid": 0, "Cash": 0 };
 
     results.forEach(page => {
@@ -72,17 +67,12 @@ export async function getMonthlySummary(year, month) {
       const category = page.properties.Category?.select?.name || 'Other';
       const source = page.properties.Payment?.select?.name;
       const dest = page.properties.Destination?.select?.name;
-
-      // Check if the Exclude checkbox is ticked
       const isExcluded = page.properties.Exclude?.checkbox === true;
 
       if (type === 'Expense') {
-        // ALWAYS deduct from the live bank balance, because the money still left your account
         if (source && accountBalances[source] !== undefined) {
           accountBalances[source] -= amount;
         }
-
-        // ONLY add to total spent and category totals if it is NOT excluded
         if (!isExcluded) {
           totalExpense += amount;
           categoryTotals[category] = (categoryTotals[category] || 0) + amount;
@@ -90,11 +80,9 @@ export async function getMonthlySummary(year, month) {
       }
       else if (type === 'Income') {
         totalIncome += amount;
-        // Income goes INTO the source account
         if (source && accountBalances[source] !== undefined) accountBalances[source] += amount;
       }
       else if (type === 'Transfer') {
-        // Minus from source, Plus to destination
         if (source && accountBalances[source] !== undefined) accountBalances[source] -= amount;
         if (dest && accountBalances[dest] !== undefined) accountBalances[dest] += amount;
       }
@@ -105,10 +93,10 @@ export async function getMonthlySummary(year, month) {
       totalIncome,
       balance: totalIncome - totalExpense,
       categoryTotals,
-      accountBalances // Return the new bank balances
+      accountBalances
     };
   } catch (error) {
-    console.error('❌ Error fetching Notion summary:', error);
-    throw new Error('Failed to fetch monthly summary.');
+    console.error('Error fetching Notion summary:', error);
+    throw new Error('Failed to fetch summary for this date range.');
   }
 }

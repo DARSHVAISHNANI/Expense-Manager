@@ -8,7 +8,7 @@ const formatCurrency = (amount) => {
 /**
  * Formats the success message when a new entry is added.
  */
-export function formatAddedEntry(parsedData, summary, userConfig = {}) {
+export function formatAddedEntry(parsedData, summary, displayTitle, userConfig = {}) {
   const dateObj = new Date(parsedData.date);
   const formattedDate = dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
 
@@ -25,9 +25,8 @@ export function formatAddedEntry(parsedData, summary, userConfig = {}) {
   text += `💸 ${formatCurrency(parsedData.amount)}  •  📂 ${parsedData.category}\n`;
   text += `📅 ${formattedDate}\n`;
 
-  // We can just call formatSummaryOnly to attach the dashboard to the bottom
-  const now = new Date();
-  text += `\n${formatSummaryOnly(summary, now.getMonth() + 1, now.getFullYear(), userConfig)}`;
+  // FIX: Pass the displayTitle directly to formatSummaryOnly instead of month/year
+  text += `\n${formatSummaryOnly(summary, displayTitle, userConfig)}`;
 
   return text;
 }
@@ -35,14 +34,13 @@ export function formatAddedEntry(parsedData, summary, userConfig = {}) {
 /**
  * Formats the message for the /summary command.
  */
-export function formatSummaryOnly(summary, month, year, userConfig = {}) {
-  const dateObj = new Date(year, month - 1);
-  const monthYear = dateObj.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+export function formatSummaryOnly(summary, title, userConfig = {}) {
 
   const displayIncome = userConfig.income > 0 ? userConfig.income : summary.totalIncome;
   const currentSavings = displayIncome - summary.totalExpense;
 
-  let text = `📊 ${monthYear} Summary\n`;
+  // Use the custom title passed from the bot
+  let text = `📊 ${title}\n`;
   text += `━━━━━━━━━━━━━━━━━━━━\n`;
   text += `💰 Est. Income: ${formatCurrency(displayIncome)}\n`;
   text += `💸 Total Spent: ${formatCurrency(summary.totalExpense)}\n`;
