@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { computeProjection } from './calculations.js';
 
 // Helper to format numbers cleanly (e.g., ₹10,000)
 const formatCurrency = (amount) => {
@@ -8,7 +9,7 @@ const formatCurrency = (amount) => {
 /**
  * Formats the success message when a new entry is added.
  */
-export function formatAddedEntry(parsedData, summary, displayTitle, userConfig = {}) {
+export function formatAddedEntry(parsedData, summary, displayTitle, userConfig = {}, dateCtx = {}) {
   const dateObj = new Date(parsedData.date);
   const formattedDate = dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
 
@@ -26,7 +27,7 @@ export function formatAddedEntry(parsedData, summary, displayTitle, userConfig =
   text += `📅 ${formattedDate}\n`;
 
   // FIX: Pass the displayTitle directly to formatSummaryOnly instead of month/year
-  text += `\n${formatSummaryOnly(summary, displayTitle, userConfig)}`;
+  text += `\n${formatSummaryOnly(summary, displayTitle, userConfig, dateCtx)}`;
 
   return text;
 }
@@ -34,7 +35,7 @@ export function formatAddedEntry(parsedData, summary, displayTitle, userConfig =
 /**
  * Formats the message for the /summary command.
  */
-export function formatSummaryOnly(summary, title, userConfig = {}) {
+export function formatSummaryOnly(summary, title, userConfig = {}, dateCtx = {}) {
 
   const displayIncome = userConfig.income > 0 ? userConfig.income : summary.totalIncome;
   const currentSavings = displayIncome - summary.totalExpense;
@@ -56,6 +57,28 @@ export function formatSummaryOnly(summary, title, userConfig = {}) {
   text += `💳 HDFC: ${formatCurrency(hdfcLive)}\n`;
   text += `🏛️ SBI: ${formatCurrency(sbiLive)}\n`;
   text += `💵 Cash: ${formatCurrency(cashLive)}\n`;
+
+  // 1b. WEEKLY BURN RATE + END-OF-CYCLE PROJECTION (needs the real cycle dates)
+  if (dateCtx.startDate && dateCtx.endDate && dateCtx.today) {
+    const { weeklyRate, projectedSpend, projectedSavings, isEarly } = computeProjection({
+      totalExpense: summary.totalExpense,
+      income: displayIncome,
+      startDate: dateCtx.startDate,
+      endDate: dateCtx.endDate,
+      today: dateCtx.today,
+    });
+
+    text += `━━━━━━━━━━━━━━━━━━━━\n`;
+    text += `📈 Weekly Burn: ${formatCurrency(weeklyRate)}/week${isEarly ? ' (early estimate)' : ''}\n`;
+    text += `🔮 Projected Spend (cycle end): ${formatCurrency(projectedSpend)}\n`;
+    text += `💰 Projected Savings: ${formatCurrency(projectedSavings)}\n`;
+
+    if (userConfig.savingsTarget > 0) {
+      text += projectedSavings >= userConfig.savingsTarget
+        ? `✅ On pace to hit your target\n`
+        : `⚠️ Off pace — projected short by ${formatCurrency(userConfig.savingsTarget - projectedSavings)}\n`;
+    }
+  }
 
   // 2. ONLY SHOW SAVINGS GOAL IF SET
   if (userConfig.savingsTarget > 0) {
