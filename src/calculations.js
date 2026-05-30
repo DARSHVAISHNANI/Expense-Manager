@@ -62,3 +62,43 @@ export function computeProjection({ totalExpense, income, startDate, endDate, to
     isEarly: daysElapsed < 7,
   };
 }
+
+/**
+ * How much you can still spend per remaining week and finish the cycle with at
+ * least your savings target left (measured as net = income − total spending).
+ *
+ * Allowed remaining spend = (income − savingsTarget) − totalExpense, spread over
+ * the weeks left in the cycle.
+ *
+ * @param {object} input
+ * @param {number} input.income - expected income for the cycle
+ * @param {number} input.totalExpense - total spent so far in the cycle
+ * @param {number} input.savingsTarget - net you want to have left at cycle end
+ * @param {string} input.startDate - cycle start, YYYY-MM-DD
+ * @param {string} input.endDate - cycle end, YYYY-MM-DD
+ * @param {string} input.today - current date, YYYY-MM-DD (IST)
+ * @returns {{remainingAllowance:number, remainingDays:number, remainingWeeks:number, weeklyAllowance:(number|null), overBudget:boolean, cycleEnded:boolean}}
+ */
+export function computeWeeklyAllowance({ income, totalExpense, savingsTarget, startDate, endDate, today }) {
+  const totalDays = inclusiveDays(startDate, endDate);
+  const rawElapsed = inclusiveDays(startDate, today);
+  const daysElapsed = Math.min(Math.max(rawElapsed, 1), totalDays);
+  const remainingDays = Math.max(totalDays - daysElapsed, 0);
+  const remainingWeeks = remainingDays / 7;
+
+  // What you can still spend and keep `savingsTarget` as net at cycle end.
+  const remainingAllowance = (income - savingsTarget) - totalExpense;
+
+  const weeklyAllowance = remainingDays > 0
+    ? Math.round(remainingAllowance / remainingWeeks)
+    : null;
+
+  return {
+    remainingAllowance,
+    remainingDays,
+    remainingWeeks,
+    weeklyAllowance,
+    overBudget: remainingAllowance < 0,
+    cycleEnded: remainingDays <= 0,
+  };
+}

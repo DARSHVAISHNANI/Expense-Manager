@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { backSolveInit, computeProjection } from './calculations.js';
+import { backSolveInit, computeProjection, computeWeeklyAllowance } from './calculations.js';
 
 // --- S-1: Back-solve the stored opening balance from a typed CURRENT balance ---
 // Invariant we care about: storedInit + delta === typedCurrentBalance
@@ -93,4 +93,51 @@ test('computeProjection: zero spending projects zero spend and full income as sa
   assert.equal(r.weeklyRate, 0);
   assert.equal(r.projectedSpend, 0);
   assert.equal(r.projectedSavings, 8000);
+});
+
+// --- Weekly spending allowance: how much you can still spend per remaining week
+//     and finish the cycle with at least your savings target left (as net). ---
+
+test('computeWeeklyAllowance: the user example — 35k income, 1k spent, 10k target, 3 weeks left -> 8000/week', () => {
+  const r = computeWeeklyAllowance({
+    income: 35000,
+    totalExpense: 1000,
+    savingsTarget: 10000,
+    startDate: '2026-05-01',
+    endDate: '2026-05-28', // 28 days = 4 weeks
+    today: '2026-05-07',   // 7 days in -> 21 days / 3 weeks remain
+  });
+  assert.equal(r.remainingAllowance, 24000); // (35000 - 10000) - 1000
+  assert.equal(r.remainingDays, 21);
+  assert.equal(r.weeklyAllowance, 8000);
+  assert.equal(r.overBudget, false);
+  assert.equal(r.cycleEnded, false);
+});
+
+test('computeWeeklyAllowance: flags overBudget when you have already spent past what the target allows', () => {
+  const r = computeWeeklyAllowance({
+    income: 35000,
+    totalExpense: 30000,
+    savingsTarget: 10000,
+    startDate: '2026-05-01',
+    endDate: '2026-05-28',
+    today: '2026-05-07',
+  });
+  // (35000 - 10000) - 30000 = -5000 -> no room left
+  assert.equal(r.remainingAllowance, -5000);
+  assert.equal(r.overBudget, true);
+});
+
+test('computeWeeklyAllowance: flags cycleEnded and gives no weekly figure once the cycle is over', () => {
+  const r = computeWeeklyAllowance({
+    income: 35000,
+    totalExpense: 1000,
+    savingsTarget: 10000,
+    startDate: '2026-05-01',
+    endDate: '2026-05-28',
+    today: '2026-06-10', // past the end
+  });
+  assert.equal(r.remainingDays, 0);
+  assert.equal(r.cycleEnded, true);
+  assert.equal(r.weeklyAllowance, null);
 });

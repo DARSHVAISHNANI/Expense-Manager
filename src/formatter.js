@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { computeProjection } from './calculations.js';
+import { computeProjection, computeWeeklyAllowance } from './calculations.js';
 
 // Helper to format numbers cleanly (e.g., ₹10,000)
 const formatCurrency = (amount) => {
@@ -45,18 +45,31 @@ export function formatSummaryOnly(summary, title, userConfig = {}, dateCtx = {})
   text += `━━━━━━━━━━━━━━━━━━━━\n`;
   text += `💰 Est. Income: ${formatCurrency(displayIncome)}\n`;
   text += `💸 Total Spent: ${formatCurrency(summary.totalExpense)}\n`;
-  text += `📉 Current Bal: ${formatCurrency(currentSavings)}\n`;
+  // This is income minus spending — a savings/progress figure, NOT cash on hand.
+  // (Real money on hand is the "Total Cash" line below.)
+  text += `💼 Net (Income − Spent): ${formatCurrency(currentSavings)}\n`;
+
+  // SAVINGS GOAL: shown directly below Net since it's a net-vs-target check.
+  if (userConfig.savingsTarget > 0) {
+    const savingsLeftToTarget = currentSavings - userConfig.savingsTarget;
+    text += `🎯 Savings Goal: ${formatCurrency(userConfig.savingsTarget)}\n`;
+    text += savingsLeftToTarget >= 0
+      ? `✅ On Track! (+${formatCurrency(savingsLeftToTarget)})\n`
+      : `⚠️ Warning: Short by ${formatCurrency(Math.abs(savingsLeftToTarget))}\n`;
+  }
 
   // 1. ALWAYS SHOW LIVE BALANCES (Opening Balance + Notion Transactions)
   const hdfcLive = (userConfig.hdfcInit || 0) + (summary.accountBalances?.['HDFC'] || 0);
   const sbiLive = (userConfig.sbiInit || 0) + (summary.accountBalances?.['SBI'] || 0);
   const cashLive = (userConfig.cashInit || 0) + (summary.accountBalances?.['Cash'] || 0);
+  const totalCash = hdfcLive + sbiLive + cashLive;
 
   text += `━━━━━━━━━━━━━━━━━━━━\n`;
   text += `🏦 Live Balances:\n`;
   text += `💳 HDFC: ${formatCurrency(hdfcLive)}\n`;
   text += `🏛️ SBI: ${formatCurrency(sbiLive)}\n`;
   text += `💵 Cash: ${formatCurrency(cashLive)}\n`;
+  text += `🏦 Total Cash: ${formatCurrency(totalCash)}\n`;
 
   // 1b. WEEKLY BURN RATE + END-OF-CYCLE PROJECTION (needs the real cycle dates)
   if (dateCtx.startDate && dateCtx.endDate && dateCtx.today) {
@@ -73,21 +86,29 @@ export function formatSummaryOnly(summary, title, userConfig = {}, dateCtx = {})
     text += `🔮 Projected Spend (cycle end): ${formatCurrency(projectedSpend)}\n`;
     text += `💰 Projected Savings: ${formatCurrency(projectedSavings)}\n`;
 
+    // WEEKLY SPENDING LIMIT: how much you can still spend each remaining week and
+    // finish the cycle with at least your savings target left.
     if (userConfig.savingsTarget > 0) {
-      text += projectedSavings >= userConfig.savingsTarget
-        ? `✅ On pace to hit your target\n`
-        : `⚠️ Off pace — projected short by ${formatCurrency(userConfig.savingsTarget - projectedSavings)}\n`;
-    }
-  }
+      const allow = computeWeeklyAllowance({
+        income: displayIncome,
+        totalExpense: summary.totalExpense,
+        savingsTarget: userConfig.savingsTarget,
+        startDate: dateCtx.startDate,
+        endDate: dateCtx.endDate,
+        today: dateCtx.today,
+      });
 
-  // 2. ONLY SHOW SAVINGS GOAL IF SET
-  if (userConfig.savingsTarget > 0) {
-    const savingsLeftToTarget = currentSavings - userConfig.savingsTarget;
-    text += `━━━━━━━━━━━━━━━━━━━━\n`;
-    text += `🎯 Savings Goal: ${formatCurrency(userConfig.savingsTarget)}\n`;
-    text += savingsLeftToTarget >= 0
-      ? `✅ On Track! (+${formatCurrency(savingsLeftToTarget)})\n`
-      : `⚠️ Warning: Short by ${formatCurrency(Math.abs(savingsLeftToTarget))}\n`;
+      if (allow.cycleEnded) {
+        // Cycle is over — nothing left to budget.
+      } else if (allow.overBudget) {
+        text += `⛔ Already ${formatCurrency(-allow.remainingAllowance)} past your ${formatCurrency(userConfig.savingsTarget)} target — no room left to spend.\n`;
+      } else {
+        text += `🎚️ To keep ${formatCurrency(userConfig.savingsTarget)}: spend ≤ ${formatCurrency(allow.weeklyAllowance)}/week (${allow.remainingDays} days left)\n`;
+        text += weeklyRate <= allow.weeklyAllowance
+          ? `✅ Your ${formatCurrency(weeklyRate)}/week pace is within budget\n`
+          : `⚠️ Slow down — your ${formatCurrency(weeklyRate)}/week pace is over by ${formatCurrency(weeklyRate - allow.weeklyAllowance)}/week\n`;
+      }
+    }
   }
 
   // 3. ALWAYS SHOW SPENDING, BUT ONLY SHOW LIMITS IF SET
