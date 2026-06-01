@@ -6,9 +6,19 @@ import { parseTransactionText } from './parser.js';
 import { transcribeAudio } from './transcriber.js';
 import { insertEntry, getDateRangeSummary } from './notion.js';
 import { formatAddedEntry, formatSummaryOnly, formatError } from './formatter.js';
+import { backSolveInit } from './calculations.js';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const allowedUserId = parseInt(process.env.ALLOWED_TELEGRAM_USER_ID, 10);
+
+// Today's date in IST as YYYY-MM-DD — used for projections and as the live "now".
+const getISTToday = () => {
+  const nowIST = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  const year = nowIST.getFullYear();
+  const month = String(nowIST.getMonth() + 1).padStart(2, '0');
+  const day = String(nowIST.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
 
 // Initialize bot in polling mode
 const bot = new TelegramBot(token, { polling: true });
@@ -27,7 +37,12 @@ let userConfig = {
   hdfcInit: 0,
   sbiInit: 0,
   cashInit: 0,
-  savingsTarget: 0
+  savingsTarget: 0,
+  // Temp holders for the CURRENT balances the user types during /setup.
+  // At setup completion these get back-solved into the *Init opening balances above.
+  hdfcCurrent: 0,
+  sbiCurrent: 0,
+  cashCurrent: 0
 };
 
 // Tracks where the user is in the setup process (0 = not in setup)
@@ -87,27 +102,21 @@ export function startBot() {
         endDate = dates[1];
         displayTitle = `${startDate} to ${endDate} Summary`;
       }
-      // 2. NEW: IF USER HAS SAVED DATES IN SETUP, USE THOSE
+      // 2. OTHERWISE USE THE SAVED /setup CYCLE DATES
       else if (userConfig.startDate && userConfig.endDate) {
         startDate = userConfig.startDate;
         endDate = userConfig.endDate;
         displayTitle = `${startDate} to ${endDate} Summary`;
       }
-      // 3. FALLBACK: IF NO SAVED DATES, DEFAULT TO CURRENT CALENDAR MONTH
+      // 3. NO CYCLE ACTIVE: ask the user to run /setup (no calendar-month guesswork)
       else {
-        const nowIST = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
-        const year = nowIST.getFullYear();
-        const month = String(nowIST.getMonth() + 1).padStart(2, '0');
-        const lastDay = new Date(year, nowIST.getMonth() + 1, 0).getDate();
-
-        startDate = `${year}-${month}-01`;
-        endDate = `${year}-${month}-${lastDay}`;
-        displayTitle = nowIST.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) + " Summary";
+        return bot.sendMessage(msg.chat.id, "📅 No active cycle yet. Please run /setup first to set your billing cycle and balances.");
       }
 
       // Fetch the data and format it!
       const summary = await getDateRangeSummary(startDate, endDate);
-      bot.sendMessage(msg.chat.id, formatSummaryOnly(summary, displayTitle, userConfig));
+      const dateCtx = { startDate, endDate, today: getISTToday() };
+      bot.sendMessage(msg.chat.id, formatSummaryOnly(summary, displayTitle, userConfig, dateCtx));
 
     } catch (error) {
       bot.sendMessage(msg.chat.id, formatError('Failed to fetch summary. Check your dates!'));
@@ -176,23 +185,41 @@ export function startBot() {
           case 9:
             userConfig.travelLimit = value;
             setupStep = 10;
-            return bot.sendMessage(msg.chat.id, "✅ **Question 10:** What is your CURRENT balance in your HDFC account? (On your Start Date)");
+            return bot.sendMessage(msg.chat.id, "✅ **Question 10:** What is your CURRENT balance in your HDFC account RIGHT NOW?");
           case 10:
-            userConfig.hdfcInit = value;
+            userConfig.hdfcCurrent = value;
             setupStep = 11;
-            return bot.sendMessage(msg.chat.id, "✅ **Question 11:** What is your CURRENT balance in your SBI account? (On your Start Date)");
+            return bot.sendMessage(msg.chat.id, "✅ **Question 11:** What is your CURRENT balance in your SBI account RIGHT NOW?");
           case 11:
-            userConfig.sbiInit = value;
+            userConfig.sbiCurrent = value;
             setupStep = 12;
-            return bot.sendMessage(msg.chat.id, "✅ **Question 12:** What is your CURRENT balance in Cash? (On your Start Date)");
+            return bot.sendMessage(msg.chat.id, "✅ **Question 12:** What is your CURRENT balance in Cash RIGHT NOW?");
           case 12:
-            userConfig.cashInit = value;
+            userConfig.cashCurrent = value;
             setupStep = 13;
             return bot.sendMessage(msg.chat.id, "✅ **Final Question:** What is your ultimate Savings Target for this cycle?");
-          case 13:
+          case 13: {
             userConfig.savingsTarget = value;
             setupStep = 0; // Exit setup mode
-            return bot.sendMessage(msg.chat.id, `🎉 Setup Complete! Your cycle is set from ${userConfig.startDate} to ${userConfig.endDate}. Type /summary to see your dashboard.`);
+
+            // Back-solve opening balances from the CURRENT balances the user typed, so the
+            // Live Balance immediately reads what they entered and never double-counts the
+            // transactions already in this cycle. One Notion query covers all three accounts.
+            try {
+              const setupSummary = await getDateRangeSummary(userConfig.startDate, userConfig.endDate);
+              const deltas = setupSummary.accountBalances || {};
+              userConfig.hdfcInit = backSolveInit(userConfig.hdfcCurrent, deltas['HDFC'] || 0);
+              userConfig.sbiInit = backSolveInit(userConfig.sbiCurrent, deltas['SBI'] || 0);
+              userConfig.cashInit = backSolveInit(userConfig.cashCurrent, deltas['Cash'] || 0);
+              return bot.sendMessage(msg.chat.id, `🎉 Setup Complete! Your cycle is set from ${userConfig.startDate} to ${userConfig.endDate}. Live balances are reconciled with your existing transactions. Type /summary to see your dashboard.`);
+            } catch (error) {
+              // Couldn't reach Notion to reconcile — store typed values as-is and warn.
+              userConfig.hdfcInit = userConfig.hdfcCurrent;
+              userConfig.sbiInit = userConfig.sbiCurrent;
+              userConfig.cashInit = userConfig.cashCurrent;
+              return bot.sendMessage(msg.chat.id, `🎉 Setup saved (cycle ${userConfig.startDate} to ${userConfig.endDate}), but I couldn't reach Notion to reconcile your live balances against existing transactions. Please re-run /setup once your connection is back so the numbers stay accurate.`);
+            }
+          }
         }
       }
     } // End of setup wizard
@@ -220,28 +247,23 @@ export function startBot() {
       // 6. Wait 2500ms to give Notion time to index the new entry
       await new Promise(resolve => setTimeout(resolve, 2500));
 
-      // 7. NEW: Check if user has custom dates set, otherwise fallback to current month
-      let startDate, endDate, displayTitle;
-      if (userConfig.startDate && userConfig.endDate) {
-        startDate = userConfig.startDate;
-        endDate = userConfig.endDate;
-        displayTitle = `${startDate} to ${endDate} Summary`;
-      } else {
-        const nowIST = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
-        const year = nowIST.getFullYear();
-        const month = String(nowIST.getMonth() + 1).padStart(2, '0');
-        const lastDay = new Date(year, nowIST.getMonth() + 1, 0).getDate();
-
-        startDate = `${year}-${month}-01`;
-        endDate = `${year}-${month}-${lastDay}`;
-        displayTitle = nowIST.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) + " Summary";
+      // 7. No active /setup cycle: the entry is saved, but we can't show a cycle
+      //    dashboard without dates. Confirm the save and nudge them to run /setup.
+      if (!userConfig.startDate || !userConfig.endDate) {
+        return bot.sendMessage(msg.chat.id, `✅ Saved: ${parsedData.name} (₹${parsedData.amount.toLocaleString('en-IN')}).\n\n📅 Run /setup to set your billing cycle and see your full dashboard.`);
       }
 
-      // 8. Fetch the newly updated summary data
+      // 8. Use the saved /setup cycle dates.
+      const startDate = userConfig.startDate;
+      const endDate = userConfig.endDate;
+      const displayTitle = `${startDate} to ${endDate} Summary`;
+
+      // 9. Fetch the newly updated summary data
       const summary = await getDateRangeSummary(startDate, endDate);
 
-      // 9. Send the success message!
-      bot.sendMessage(msg.chat.id, formatAddedEntry(parsedData, summary, displayTitle, userConfig));
+      // 10. Send the success message!
+      const dateCtx = { startDate, endDate, today: getISTToday() };
+      bot.sendMessage(msg.chat.id, formatAddedEntry(parsedData, summary, displayTitle, userConfig, dateCtx));
 
     } catch (error) {
       bot.sendMessage(msg.chat.id, formatError(error.message));
