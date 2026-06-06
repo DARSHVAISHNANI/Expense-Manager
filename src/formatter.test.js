@@ -44,33 +44,13 @@ test('formatSummaryOnly labels the income-minus-spent figure as Net, not a cash 
   assert.doesNotMatch(out, /Current Bal/);
 });
 
-test('formatSummaryOnly renders the weekly burn + projection block from the cycle dates', () => {
+test('formatSummaryOnly: no longer renders the old Weekly Burn / Projected block', () => {
+  // These were removed — only the cycle-anchored "Last Week" + "Savings plan"
+  // blocks survive (and only when lastWeek is passed in).
   const out = formatSummaryOnly(summary, 'Test Summary', userConfig, dateCtx);
-  // 1000 over 7 days of a 28-day cycle -> 1000/week, 4000 projected spend, 6000 projected savings.
-  assert.match(out, /Weekly Burn: ₹1,000\/week/);
-  assert.match(out, /Projected Spend \(cycle end\): ₹4,000/);
-  assert.match(out, /Projected Savings: ₹6,000/);
-});
-
-test('formatSummaryOnly shows the weekly spending limit needed to keep the savings target', () => {
-  const out = formatSummaryOnly(summary, 'Test Summary', userConfig, dateCtx);
-  // Allowance = (10000 income - 5000 target) - 1000 spent = 4000, over 21 days / 3 weeks -> ~1333/week.
-  assert.match(out, /To keep ₹5,000: spend ≤ ₹1,333\/week \(21 days left\)/);
-  // Actual pace 1000/week <= 1333/week limit -> within budget.
-  assert.match(out, /within budget/);
-});
-
-test('formatSummaryOnly warns to slow down when the pace exceeds the weekly limit', () => {
-  // Spent 4000 in week 1: allowance = (10000 - 5000) - 4000 = 1000 over 3 weeks -> 333/week,
-  // but the actual pace is 4000/week -> over budget guidance.
-  const heavy = { ...summary, totalExpense: 4000, categoryTotals: { Food: 4000 } };
-  const out = formatSummaryOnly(heavy, 'Test Summary', userConfig, dateCtx);
-  assert.match(out, /Slow down/);
-});
-
-test('formatSummaryOnly omits the projection block when cycle dates are missing', () => {
-  const out = formatSummaryOnly(summary, 'Test Summary', userConfig, {});
   assert.doesNotMatch(out, /Weekly Burn/);
+  assert.doesNotMatch(out, /Projected Spend/);
+  assert.doesNotMatch(out, /Projected Savings/);
 });
 
 test('formatSummaryOnly places the Savings Goal block right after Net, before Live Balances', () => {
@@ -115,7 +95,7 @@ test('formatAddedEntries: single entry uses detailed format', () => {
 
 // --- Last-week section in /summary ---
 
-test('formatSummaryOnly: shows Last Week block when lastWeek has spend', () => {
+test('formatSummaryOnly: shows Last Week block with human-readable per-day rows', () => {
   const lastWeek = {
     startDate: '2026-06-01', endDate: '2026-06-07',
     days: [
@@ -130,16 +110,53 @@ test('formatSummaryOnly: shows Last Week block when lastWeek has spend', () => {
     total: 4500, projectedMonthly: 19286,
   };
   const out = formatSummaryOnly(summary, 'Test Summary', userConfig, dateCtx, lastWeek);
-  assert.ok(out.includes('Last Week (Mon–Sun, excl. rent)'));
-  assert.ok(out.includes('Mon 06-01'));
-  assert.ok(out.includes('Total: ₹4,500'));
-  assert.ok(out.includes('Projected monthly (×30/7): ₹19,286'));
+  assert.ok(out.includes('Last Week (01 Jun - Monday → 07 Jun - Sunday'));
+  // New human-readable date row format: "01 Jun - Monday: ₹1,000"
+  assert.ok(out.includes('01 Jun - Monday: ₹1,000'));
+  assert.ok(out.includes('05 Jun - Friday: ₹450'));
+  assert.ok(out.includes('Weekly total: ₹4,500'));
+  // Zero-spend days should be skipped from the list, but total still includes them.
+  assert.ok(!out.includes('04 Jun - Thursday: ₹0'));
 });
 
 test('formatSummaryOnly: omits Last Week block when total is zero', () => {
   const lastWeek = { startDate: '2026-06-01', endDate: '2026-06-07', days: [], total: 0, projectedMonthly: 0 };
   const out = formatSummaryOnly(summary, 'Test Summary', userConfig, dateCtx, lastWeek);
   assert.ok(!out.includes('Last Week'));
+});
+
+test('formatSummaryOnly: includes savings plan recommendation when target + lastWeek + dates are set', () => {
+  // userConfig income=10k, savingsTarget=5k. summary.totalExpense=1k → net=9k.
+  // Available = 9k - 5k = 4k. dateCtx today=2026-05-07 end=2026-05-28 → 21 days left = 3 weeks.
+  // Max ≈ 4000/3 ≈ 1333/wk. Last week pace 1k → under cap → surplus.
+  const lastWeek = {
+    startDate: '2026-04-29', endDate: '2026-05-05',
+    days: [{ date: '2026-05-05', weekday: 'Mon', total: 1000 }],
+    total: 1000, projectedMonthly: 4286,
+  };
+  const out = formatSummaryOnly(summary, 'Test Summary', userConfig, dateCtx, lastWeek);
+  assert.ok(out.includes('Savings plan'));
+  assert.ok(out.includes('Max ₹1,333/week to hit ₹5,000'));
+  assert.ok(out.match(/save an extra ₹[\d,]+ on top of target/));
+
+  // The plan block should NOT repeat target/net — those already appear in the
+  // Savings Goal block right after Net at the top.
+  const planIdx = out.indexOf('Savings plan');
+  const planBlock = out.slice(planIdx);
+  assert.ok(!planBlock.includes('Net so far'));
+  assert.ok(!/Target: ₹/.test(planBlock));
+});
+
+test('formatSummaryOnly: warns to slow down when last-week pace is over the cap', () => {
+  // 5000/wk spent, way over the 1333/wk cap.
+  const lastWeek = {
+    startDate: '2026-04-29', endDate: '2026-05-05',
+    days: [{ date: '2026-05-05', weekday: 'Mon', total: 5000 }],
+    total: 5000, projectedMonthly: 21429,
+  };
+  const out = formatSummaryOnly(summary, 'Test Summary', userConfig, dateCtx, lastWeek);
+  assert.ok(out.includes('Slow down'));
+  assert.ok(out.includes('₹3,667/week'));
 });
 
 // --- renderDailyChart: ASCII bar chart ---
@@ -169,15 +186,39 @@ test('renderDailyChart: zero-spend window says so', () => {
 
 // --- formatQueryResult ---
 
-test('formatQueryResult: shows total and recent matches', () => {
+test('formatQueryResult: keyword search shows totals and grouped entries with notes', () => {
   const matches = [
-    { name: 'mcd burger', amount: 85, date: '2026-06-05', type: 'Expense', payment: 'Cash', excluded: false },
-    { name: 'mcd fries', amount: 35, date: '2026-06-03', type: 'Expense', payment: 'SBI', excluded: false },
+    { name: 'mcd burger', notes: 'with friends', amount: 85, date: '2026-06-05', type: 'Expense', payment: 'Cash', category: 'Food', excluded: false },
+    { name: 'mcd fries', notes: '', amount: 35, date: '2026-06-03', type: 'Expense', payment: 'SBI', category: 'Food', excluded: false },
   ];
   const out = formatQueryResult(matches, 'mcd', '2026-06-01', '2026-06-30');
-  assert.ok(out.includes('Matches: 2 entries'));
-  assert.ok(out.includes('Total spent: ₹120'));
-  assert.ok(out.includes('mcd burger'));
+  assert.ok(out.includes('"mcd"'));
+  assert.ok(out.includes('Found 2 entries'));
+  assert.ok(out.includes('spent ₹120'));
+  assert.ok(out.includes('mcd burger — ₹85 · Cash · Food'));
+  assert.ok(out.includes('↳ with friends')); // notes rendered as continuation
+});
+
+test('formatQueryResult: open question (empty keyword) lists every transaction with full detail', () => {
+  const matches = [
+    { name: 'mcd', notes: 'lunch', amount: 100, date: '2026-06-01', type: 'Expense', payment: 'Cash', category: 'Food', excluded: false },
+    { name: 'salary', notes: 'monthly', amount: 50000, date: '2026-06-01', type: 'Income', payment: 'HDFC', category: 'Salary', excluded: false },
+  ];
+  const out = formatQueryResult(matches, '', '2026-06-01', '2026-06-01');
+  assert.ok(out.includes('all spending')); // single-day → "all spending"
+  assert.ok(out.includes('01 Jun - Monday'));
+  assert.ok(out.includes('mcd — ₹100'));
+  assert.ok(out.includes('salary — ₹50,000'));
+  assert.ok(out.includes('received ₹50,000'));
+});
+
+test('formatQueryResult: range with empty keyword says "all transactions"', () => {
+  const matches = [
+    { name: 'mcd', notes: '', amount: 50, date: '2026-06-05', type: 'Expense', payment: 'Cash', category: 'Food', excluded: false },
+  ];
+  const out = formatQueryResult(matches, '', '2026-06-01', '2026-06-07');
+  assert.ok(out.includes('all transactions'));
+  assert.ok(out.includes('→')); // date range arrow
 });
 
 test('formatQueryResult: empty match list', () => {
@@ -185,12 +226,12 @@ test('formatQueryResult: empty match list', () => {
   assert.ok(out.includes('No matches'));
 });
 
-test('formatQueryResult: excluded rows shown with tag, not in total', () => {
+test('formatQueryResult: excluded rows shown with tag, not in spent total', () => {
   const matches = [
-    { name: 'mcd', amount: 100, date: '2026-06-01', type: 'Expense', payment: 'Cash', excluded: true },
-    { name: 'mcd', amount: 50, date: '2026-06-02', type: 'Expense', payment: 'Cash', excluded: false },
+    { name: 'mcd', notes: '', amount: 100, date: '2026-06-01', type: 'Expense', payment: 'Cash', category: 'Food', excluded: true },
+    { name: 'mcd', notes: '', amount: 50, date: '2026-06-02', type: 'Expense', payment: 'Cash', category: 'Food', excluded: false },
   ];
   const out = formatQueryResult(matches, 'mcd', '2026-06-01', '2026-06-30');
-  assert.ok(out.includes('Total spent: ₹50'));
-  assert.ok(out.includes('(excluded)'));
+  assert.ok(out.includes('spent ₹50'));
+  assert.ok(out.includes('_(excluded)_'));
 });

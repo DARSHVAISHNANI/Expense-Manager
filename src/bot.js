@@ -6,7 +6,7 @@ import { parseTransactionText } from './parser.js';
 import { transcribeAudio } from './transcriber.js';
 import { insertEntry, getDateRangeSummary, getDateRangePages, loadConfig, saveConfig } from './notion.js';
 import { formatAddedEntry, formatAddedEntries, formatSummaryOnly, formatError, renderDailyChart, formatQueryResult } from './formatter.js';
-import { backSolveInit, previousMondaySunday, computeLastWeek, computeDailyTotals } from './calculations.js';
+import { backSolveInit, previousCycleWeek, computeLastWeek, computeDailyTotals } from './calculations.js';
 import { parseQuery, matchTransactions } from './query.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -16,14 +16,17 @@ const fmtDateUTC = (ms) => {
 };
 
 /**
- * Fetch and aggregate the most-recently-completed Mon–Sun. Used by /summary and
- * post-entry success. Returns null on failure so callers can degrade gracefully.
+ * Fetch and aggregate the most-recently-completed cycle-week (weeks anchored
+ * to cycleStart, not calendar Mondays). Returns null when no full cycle-week
+ * has completed yet or on failure.
  */
-async function fetchLastWeek(today) {
+async function fetchLastWeek(cycleStart, today) {
+  if (!cycleStart) return null;
   try {
-    const { start, end } = previousMondaySunday(today);
-    const pages = await getDateRangePages(start, end);
-    return computeLastWeek({ pages, today });
+    const range = previousCycleWeek({ cycleStart, today });
+    if (!range) return null;
+    const pages = await getDateRangePages(range.start, range.end);
+    return computeLastWeek({ pages, cycleStart, today });
   } catch (e) {
     console.error('Failed to fetch last-week data:', e.message);
     return null;
@@ -216,7 +219,7 @@ export async function startBot() {
       const summary = await getDateRangeSummary(startDate, endDate);
       const today = getISTToday();
       const dateCtx = { startDate, endDate, today };
-      const lastWeek = await fetchLastWeek(today);
+      const lastWeek = await fetchLastWeek(startDate, today);
       bot.sendMessage(msg.chat.id, formatSummaryOnly(summary, displayTitle, userConfig, dateCtx, lastWeek));
 
     } catch (error) {
@@ -260,9 +263,8 @@ export async function startBot() {
         ? { startDate: userConfig.startDate, endDate: userConfig.endDate }
         : { startDate: today, endDate: today };
       const { keyword, startDate, endDate } = await parseQuery(question, today, defaults);
-      if (!keyword) {
-        return bot.sendMessage(msg.chat.id, '❌ I need a keyword to search for. Try: /query mcd this month');
-      }
+      // Empty keyword is fine — it means "list everything in the window" (e.g.
+      // "what did I spend on Monday"). matchTransactions handles both cases.
       const pages = await getDateRangePages(startDate, endDate);
       const matches = matchTransactions(pages, keyword);
       bot.sendMessage(msg.chat.id, formatQueryResult(matches, keyword, startDate, endDate));
@@ -413,7 +415,7 @@ export async function startBot() {
       const summary = await getDateRangeSummary(startDate, endDate);
       const today = getISTToday();
       const dateCtx = { startDate, endDate, today };
-      const lastWeek = await fetchLastWeek(today);
+      const lastWeek = await fetchLastWeek(startDate, today);
       bot.sendMessage(msg.chat.id, formatAddedEntries(entries, summary, displayTitle, userConfig, dateCtx, lastWeek));
 
     } catch (error) {

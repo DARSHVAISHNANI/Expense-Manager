@@ -110,33 +110,44 @@ export function computeWeeklyAllowance({ income, totalExpense, savingsTarget, st
 }
 
 /**
- * Most recently FULLY-completed Monday–Sunday window relative to `today`.
- * If today is Sunday, returns the week that ended LAST Sunday (a fully complete
- * prior week — not the one ending today).
+ * Most recently FULLY-completed 7-day cycle-week relative to `today`,
+ * where weeks are counted from `cycleStart` (week 1 = cycleStart..cycleStart+6,
+ * week 2 = cycleStart+7..cycleStart+13, etc.). Returns null if the cycle
+ * hasn't reached the end of its first week yet.
+ *
+ * This is what the user wants: weeks anchored to their cycle, never crossing
+ * into the previous month.
  */
-export function previousMondaySunday(today) {
-  const [y, m, d] = today.split('-').map(Number);
-  const date = new Date(Date.UTC(y, m - 1, d));
-  const dow = date.getUTCDay(); // Sun=0 .. Sat=6
-  // Days back to the previous Sunday (inclusive). If today is Sunday, skip 7 days
-  // so we get the previous week, not the one ending today.
-  const daysToPrevSunday = dow === 0 ? 7 : dow;
-  const end = new Date(date.getTime() - daysToPrevSunday * DAY_MS);
-  const start = new Date(end.getTime() - 6 * DAY_MS);
-  return { start: formatDate(start), end: formatDate(end) };
+export function previousCycleWeek({ cycleStart, today }) {
+  const startMs = Date.parse(`${cycleStart}T00:00:00Z`);
+  const todayMs = Date.parse(`${today}T00:00:00Z`);
+  if (!Number.isFinite(startMs) || !Number.isFinite(todayMs)) return null;
+
+  const daysSinceStart = Math.floor((todayMs - startMs) / DAY_MS); // 0 = on start day
+  // Number of fully-completed cycle-weeks as of `today`. Today must be PAST the
+  // end of week N for that week to count as completed.
+  const completedWeeks = Math.floor((daysSinceStart + 1) / 7);
+  if (completedWeeks < 1) return null;
+
+  const lastWeekStartMs = startMs + (completedWeeks - 1) * 7 * DAY_MS;
+  const lastWeekEndMs = lastWeekStartMs + 6 * DAY_MS;
+  return { start: formatDate(new Date(lastWeekStartMs)), end: formatDate(new Date(lastWeekEndMs)) };
 }
 
 /**
- * Aggregate per-day spending across the most-recent fully-completed Mon–Sun.
- * Filters out non-expense, excluded, and rent rows (uses isCountableExpense).
+ * Aggregate per-day spending across the most-recent fully-completed cycle-week
+ * (weeks counted from cycleStart, not calendar Mondays). Filters out
+ * non-expense, excluded, and rent rows. Returns null if no full cycle-week
+ * has completed yet.
  *
- * @returns {{ startDate:string, endDate:string, days:Array<{date,weekday,total}>, total:number, projectedMonthly:number }}
+ * @returns {{ startDate:string, endDate:string, days:Array<{date,weekday,total}>, total:number, projectedMonthly:number }|null}
  */
-export function computeLastWeek({ pages, today }) {
-  const { start, end } = previousMondaySunday(today);
+export function computeLastWeek({ pages, cycleStart, today }) {
+  const range = previousCycleWeek({ cycleStart, today });
+  if (!range) return null;
+  const { start, end } = range;
   const startMs = Date.parse(`${start}T00:00:00Z`);
 
-  // Pre-seed all 7 days at zero so missing days still appear.
   const days = Array.from({ length: 7 }, (_, i) => {
     const dt = new Date(startMs + i * DAY_MS);
     return { date: formatDate(dt), weekday: WEEKDAYS[dt.getUTCDay()], total: 0 };
@@ -153,6 +164,52 @@ export function computeLastWeek({ pages, today }) {
   const total = days.reduce((s, d) => s + d.total, 0);
   const projectedMonthly = Math.round((total * 30) / 7);
   return { startDate: start, endDate: end, days, total, projectedMonthly };
+}
+
+/**
+ * Savings-target advice from the user's actual numbers:
+ * - currentNet = income − totalExpense
+ * - availableToSpend = currentNet − savingsTarget (negative if already over)
+ * - weeksLeftInCycle = (endDate − today) / 7 (clamped, can be fractional)
+ * - maxWeeklySpend = availableToSpend / weeksLeftInCycle
+ * - projectedSavingsAtCurrentPace = currentNet − lastWeekTotal × weeksLeftInCycle
+ * - surplusOverTarget = projectedSavingsAtCurrentPace − savingsTarget
+ */
+export function computeSavingsAdvice({ income, totalExpense, savingsTarget, endDate, today, lastWeekTotal }) {
+  const todayMs = Date.parse(`${today}T00:00:00Z`);
+  const endMs = Date.parse(`${endDate}T00:00:00Z`);
+  const daysLeft = Math.max(0, Math.round((endMs - todayMs) / DAY_MS));
+  const weeksLeftInCycle = daysLeft / 7;
+  const currentNet = income - totalExpense;
+  const availableToSpend = currentNet - savingsTarget;
+
+  if (daysLeft <= 0) {
+    return {
+      currentNet,
+      availableToSpend,
+      weeksLeftInCycle: 0,
+      daysLeft: 0,
+      maxWeeklySpend: null,
+      projectedSavingsAtCurrentPace: currentNet,
+      surplusOverTarget: currentNet - savingsTarget,
+      cycleEnded: true,
+    };
+  }
+
+  const maxWeeklySpend = Math.round(availableToSpend / weeksLeftInCycle);
+  const projectedSavingsAtCurrentPace = Math.round(currentNet - lastWeekTotal * weeksLeftInCycle);
+  const surplusOverTarget = projectedSavingsAtCurrentPace - savingsTarget;
+
+  return {
+    currentNet,
+    availableToSpend,
+    weeksLeftInCycle,
+    daysLeft,
+    maxWeeklySpend,
+    projectedSavingsAtCurrentPace,
+    surplusOverTarget,
+    cycleEnded: false,
+  };
 }
 
 /**
