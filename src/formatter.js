@@ -1,9 +1,22 @@
 import 'dotenv/config';
-import { computeProjection, computeWeeklyAllowance } from './calculations.js';
+import { computeSavingsAdvice } from './calculations.js';
 
 // Helper to format numbers cleanly (e.g., ₹10,000)
 const formatCurrency = (amount) => {
   return `₹${amount.toLocaleString('en-IN')}`;
+};
+
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const WEEKDAY_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/**
+ * "2026-05-25" → "25 May - Monday"  (UTC-parsed so the day-of-week is stable
+ * regardless of the server's local timezone).
+ */
+const formatHumanDate = (ymd) => {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return `${String(d).padStart(2, '0')} ${MONTH_ABBR[dt.getUTCMonth()]} - ${WEEKDAY_FULL[dt.getUTCDay()]}`;
 };
 
 /**
@@ -94,51 +107,50 @@ export function formatSummaryOnly(summary, title, userConfig = {}, dateCtx = {},
   // 1a. LAST WEEK PER-DAY BREAKDOWN (rent excluded). Skipped on zero-spend weeks.
   if (lastWeek && lastWeek.total > 0) {
     text += `━━━━━━━━━━━━━━━━━━━━\n`;
-    text += `📅 Last Week (Mon–Sun, excl. rent):\n`;
+    text += `📅 Last Week (${formatHumanDate(lastWeek.startDate)} → ${formatHumanDate(lastWeek.endDate)}, excl. rent):\n`;
     for (const d of lastWeek.days) {
-      text += `  ${d.weekday} ${d.date.slice(5)}  ${formatCurrency(d.total)}\n`;
+      if (d.total === 0) continue; // skip zero-spend days — cleaner read
+      text += `  ${formatHumanDate(d.date)}: ${formatCurrency(d.total)}\n`;
     }
     text += `  ─────────────────\n`;
-    text += `  Total: ${formatCurrency(lastWeek.total)}\n`;
-    text += `  Projected monthly (×30/7): ${formatCurrency(lastWeek.projectedMonthly)}\n`;
-  }
+    text += `  Weekly total: ${formatCurrency(lastWeek.total)}\n`;
 
-  // 1b. WEEKLY BURN RATE + END-OF-CYCLE PROJECTION (needs the real cycle dates)
-  if (dateCtx.startDate && dateCtx.endDate && dateCtx.today) {
-    const { weeklyRate, projectedSpend, projectedSavings, isEarly } = computeProjection({
-      totalExpense: summary.totalExpense,
-      income: displayIncome,
-      startDate: dateCtx.startDate,
-      endDate: dateCtx.endDate,
-      today: dateCtx.today,
-    });
-
-    text += `━━━━━━━━━━━━━━━━━━━━\n`;
-    text += `📈 Weekly Burn: ${formatCurrency(weeklyRate)}/week${isEarly ? ' (early estimate)' : ''}\n`;
-    text += `🔮 Projected Spend (cycle end): ${formatCurrency(projectedSpend)}\n`;
-    text += `💰 Projected Savings: ${formatCurrency(projectedSavings)}\n`;
-
-    // WEEKLY SPENDING LIMIT: how much you can still spend each remaining week and
-    // finish the cycle with at least your savings target left.
-    if (userConfig.savingsTarget > 0) {
-      const allow = computeWeeklyAllowance({
+    // Savings advice — only meaningful when target is set and cycle has dates.
+    if (userConfig.savingsTarget > 0 && dateCtx.endDate && dateCtx.today) {
+      const advice = computeSavingsAdvice({
         income: displayIncome,
         totalExpense: summary.totalExpense,
         savingsTarget: userConfig.savingsTarget,
-        startDate: dateCtx.startDate,
         endDate: dateCtx.endDate,
         today: dateCtx.today,
+        lastWeekTotal: lastWeek.total,
       });
 
-      if (allow.cycleEnded) {
-        // Cycle is over — nothing left to budget.
-      } else if (allow.overBudget) {
-        text += `⛔ Already ${formatCurrency(-allow.remainingAllowance)} past your ${formatCurrency(userConfig.savingsTarget)} target — no room left to spend.\n`;
-      } else {
-        text += `🎚️ To keep ${formatCurrency(userConfig.savingsTarget)}: spend ≤ ${formatCurrency(allow.weeklyAllowance)}/week (${allow.remainingDays} days left)\n`;
-        text += weeklyRate <= allow.weeklyAllowance
-          ? `✅ Your ${formatCurrency(weeklyRate)}/week pace is within budget\n`
-          : `⚠️ Slow down — your ${formatCurrency(weeklyRate)}/week pace is over by ${formatCurrency(weeklyRate - allow.weeklyAllowance)}/week\n`;
+      if (!advice.cycleEnded) {
+        const weeksLeftStr = advice.weeksLeftInCycle >= 1
+          ? `${advice.weeksLeftInCycle.toFixed(1)} weeks`
+          : `${advice.daysLeft} days`;
+        text += `━━━━━━━━━━━━━━━━━━━━\n`;
+        text += `🎯 Savings plan:\n`;
+        text += `  Target: ${formatCurrency(userConfig.savingsTarget)} · Net so far: ${formatCurrency(advice.currentNet)}\n`;
+
+        if (advice.availableToSpend < 0) {
+          text += `  ⛔ Already ${formatCurrency(-advice.availableToSpend)} past your target — nothing left to spend this cycle.\n`;
+        } else {
+          text += `  You can still spend ${formatCurrency(advice.availableToSpend)} over ${weeksLeftStr}.\n`;
+          text += `  ➤ Max ${formatCurrency(advice.maxWeeklySpend)}/week to hit ${formatCurrency(userConfig.savingsTarget)}.\n`;
+
+          // Compare current pace (last week) to the cap.
+          if (lastWeek.total <= advice.maxWeeklySpend) {
+            const surplus = advice.surplusOverTarget;
+            text += surplus > 0
+              ? `  ✅ At your current ${formatCurrency(lastWeek.total)}/week pace, you'll save an extra ${formatCurrency(surplus)} on top of target.\n`
+              : `  ✅ At your current ${formatCurrency(lastWeek.total)}/week pace, you'll hit target with ${formatCurrency(Math.abs(surplus))} to spare on spending.\n`;
+          } else {
+            const over = lastWeek.total - advice.maxWeeklySpend;
+            text += `  ⚠️ Slow down — last week's ${formatCurrency(lastWeek.total)} is over by ${formatCurrency(over)}/week. Cap at ${formatCurrency(advice.maxWeeklySpend)}/week to stay on target.\n`;
+          }
+        }
       }
     }
   }
@@ -196,26 +208,56 @@ export function renderDailyChart(days, { width = 12 } = {}) {
 }
 
 /**
- * Renders a /query response. Total is summed across non-excluded Expense rows
- * only — Income and excluded rows are shown but don't add to the total.
+ * Renders a /query response in a human-readable narrative form.
+ * - Header adapts to single-day vs range, keyword vs open question.
+ * - Full details per entry: name, amount, payment, category, and notes if any.
+ * - Total is summed across non-excluded Expense rows only — income and
+ *   excluded rows are shown but don't add to the total.
  */
 export function formatQueryResult(matches, keyword, startDate, endDate) {
-  let text = `🔎 "${keyword}" · ${startDate} → ${endDate}\n`;
+  const singleDay = startDate === endDate;
+  const rangeStr = singleDay ? formatHumanDate(startDate) : `${formatHumanDate(startDate)} → ${formatHumanDate(endDate)}`;
+  const headerSubject = keyword
+    ? `"${keyword}"`
+    : (singleDay ? 'all spending' : 'all transactions');
+
+  let text = `🔎 ${headerSubject} · ${rangeStr}\n`;
+
   if (matches.length === 0) {
     text += `No matches.`;
     return text;
   }
-  const total = matches
+
+  const expenseTotal = matches
     .filter(m => m.type === 'Expense' && !m.excluded)
     .reduce((s, m) => s + m.amount, 0);
-  text += `Matches: ${matches.length} entries · Total spent: ${formatCurrency(total)}\n`;
-  text += `Recent:\n`;
-  const top = matches.slice(0, 5);
-  for (const m of top) {
-    const tag = m.excluded ? ' (excluded)' : m.type !== 'Expense' ? ` (${m.type})` : '';
-    text += `  ${m.date.slice(5)} ${m.name} · ${formatCurrency(m.amount)} · ${m.payment}${tag}\n`;
+  const incomeTotal = matches
+    .filter(m => m.type === 'Income' && !m.excluded)
+    .reduce((s, m) => s + m.amount, 0);
+
+  text += `Found ${matches.length} ${matches.length === 1 ? 'entry' : 'entries'}`;
+  if (expenseTotal > 0) text += ` · spent ${formatCurrency(expenseTotal)}`;
+  if (incomeTotal > 0) text += ` · received ${formatCurrency(incomeTotal)}`;
+  text += `\n━━━━━━━━━━━━━━━━━━━━\n`;
+
+  // Group by date so range queries read like a diary.
+  const byDate = new Map();
+  for (const m of matches) {
+    if (!byDate.has(m.date)) byDate.set(m.date, []);
+    byDate.get(m.date).push(m);
   }
-  if (matches.length > 5) text += `  ... +${matches.length - 5} more\n`;
+
+  for (const [date, entries] of byDate) {
+    if (!singleDay) text += `\n${formatHumanDate(date)}\n`;
+    for (const m of entries) {
+      const tag = m.excluded ? ' _(excluded)_' : m.type !== 'Expense' ? ` _(${m.type})_` : '';
+      text += `  • ${m.name} — ${formatCurrency(m.amount)} · ${m.payment} · ${m.category}${tag}\n`;
+      if (m.notes && m.notes.trim()) {
+        text += `      ↳ ${m.notes.trim()}\n`;
+      }
+    }
+  }
+
   return text;
 }
 

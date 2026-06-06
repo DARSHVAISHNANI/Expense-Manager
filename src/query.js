@@ -11,19 +11,24 @@ const readText = (prop) => {
 };
 
 /**
- * Substring-match `keyword` against Name + " " + Notes of each page (case-insensitive).
- * Matches all transaction types (Expense/Income/Transfer) so queries like "salary"
- * find income too. Results sorted by date descending.
+ * Filter pages by an optional `keyword` (substring match against Name+Notes,
+ * case-insensitive). Empty keyword returns ALL pages in the window — used when
+ * the user asks an open question like "what did I spend on Monday".
+ *
+ * Matches all transaction types so "salary" queries find income too. Sorted by
+ * date desc. Each match carries name, notes, amount, date, type, payment,
+ * category, excluded.
  */
 export function matchTransactions(pages, keyword) {
   const kw = (keyword || '').trim().toLowerCase();
-  if (!kw) return [];
   const matched = [];
   for (const p of pages) {
     const name = readText(p.properties?.Name);
     const notes = readText(p.properties?.Notes);
-    const haystack = `${name} ${notes}`.toLowerCase();
-    if (!haystack.includes(kw)) continue;
+    if (kw) {
+      const haystack = `${name} ${notes}`.toLowerCase();
+      if (!haystack.includes(kw)) continue;
+    }
     matched.push({
       name,
       notes,
@@ -31,6 +36,7 @@ export function matchTransactions(pages, keyword) {
       date: p.properties?.Date?.date?.start || '',
       type: p.properties?.Type?.select?.name || '',
       payment: p.properties?.Payment?.select?.name || '',
+      category: p.properties?.Category?.select?.name || '',
       excluded: p.properties?.Exclude?.checkbox === true,
     });
   }
@@ -39,21 +45,28 @@ export function matchTransactions(pages, keyword) {
 }
 
 /**
- * LLM-backed: turns "total mcd this month" into {keyword, startDate, endDate}.
- * Missing fields fall back to `defaults`.
+ * LLM-backed: turns "what did I spend on Monday" / "total mcd this month" /
+ * "swiggy last week" into a structured filter.
+ *
+ * Returns {keyword, startDate, endDate}. keyword may be EMPTY when the user
+ * asks generally ("what did I spend on Monday") — that's the signal to list
+ * every transaction in the window.
  */
 export async function parseQuery(text, today, defaults = {}) {
   const systemPrompt = `You convert a user's spending question into a JSON filter. Return ONLY this JSON object — no markdown, no commentary:
 {"keyword": string, "startDate": "YYYY-MM-DD", "endDate": "YYYY-MM-DD"}
 
-- keyword: the merchant/category word to search for in transaction Name + Notes. Lowercase. Empty string if user asks generally.
+- keyword: the merchant, category, or specific word to substring-match in Name + Notes. Lowercase. Use an EMPTY STRING when the user asks generally ("what did I spend on Monday", "list all expenses last week", "show transactions in June"). Only set keyword when the user names a specific thing (mcd, swiggy, salary, pizza, groceries).
 - startDate, endDate: inclusive window. Resolve relative phrases against today=${today}:
   - "this month" → first day of today's month → last day of today's month
-  - "last week" → most recent fully-completed Monday → Sunday
+  - "last month" → first → last day of the previous month
+  - "last week" → most recent fully-completed Monday → Sunday relative to today
+  - "this week" → most recent Monday → today
   - "today" → ${today} → ${today}
   - "yesterday" → today-1 → today-1
-  - month names like "June" → first → last day of that month in the current year
-  - if no timeframe is mentioned, use start=${defaults.startDate || today} end=${defaults.endDate || today}`;
+  - Specific weekday names like "Monday", "on Tuesday" → the date of the most recent past occurrence of that weekday (single day, start == end)
+  - Month names like "June" → first → last day of that month in the current year
+  - If no timeframe is mentioned, use start=${defaults.startDate || today} end=${defaults.endDate || today}`;
 
   const chatCompletion = await groq.chat.completions.create({
     messages: [

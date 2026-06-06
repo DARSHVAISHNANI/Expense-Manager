@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { backSolveInit, computeProjection, computeWeeklyAllowance, previousMondaySunday, computeLastWeek, computeDailyTotals } from './calculations.js';
+import { backSolveInit, computeProjection, computeWeeklyAllowance, previousCycleWeek, computeLastWeek, computeDailyTotals, computeSavingsAdvice } from './calculations.js';
 import { isCountableExpense } from './notion.js';
 
 const mkPage = (date, amount, { category = 'Food', type = 'Expense', excluded = false } = {}) => ({
@@ -187,29 +187,41 @@ test('computeWeeklyAllowance: flags cycleEnded and gives no weekly figure once t
   assert.equal(r.weeklyAllowance, null);
 });
 
-// --- previousMondaySunday: returns the most recent FULLY-completed Mon-Sun ---
+// --- previousCycleWeek: cycle-anchored week, never crosses into previous month ---
 
-test('previousMondaySunday: Wednesday 2026-06-10 returns prev Mon-Sun (Jun 1-7)', () => {
-  assert.deepStrictEqual(previousMondaySunday('2026-06-10'), { start: '2026-06-01', end: '2026-06-07' });
+test('previousCycleWeek: cycle May 25, today Jun 5 → last week is May 25-31 (week 1)', () => {
+  // Cycle started May 25. Week 1 = May 25-31. Today is in week 2 (Jun 1-7).
+  // Most recently COMPLETED week is week 1.
+  assert.deepStrictEqual(
+    previousCycleWeek({ cycleStart: '2026-05-25', today: '2026-06-05' }),
+    { start: '2026-05-25', end: '2026-05-31' }
+  );
 });
 
-test('previousMondaySunday: Monday 2026-06-08 returns prev Mon-Sun (Jun 1-7)', () => {
-  assert.deepStrictEqual(previousMondaySunday('2026-06-08'), { start: '2026-06-01', end: '2026-06-07' });
+test('previousCycleWeek: cycle May 25, today Jun 8 → last week is Jun 1-7 (week 2 just completed)', () => {
+  // Jun 8 is day 14 (day 0 = May 25), so 2 full weeks have completed.
+  assert.deepStrictEqual(
+    previousCycleWeek({ cycleStart: '2026-05-25', today: '2026-06-08' }),
+    { start: '2026-06-01', end: '2026-06-07' }
+  );
 });
 
-test('previousMondaySunday: Sunday 2026-06-07 returns the WEEK BEFORE (May 25-31)', () => {
-  // Sunday — the current week ends today but it's only just "completed", we want
-  // the previous fully-completed window.
-  assert.deepStrictEqual(previousMondaySunday('2026-06-07'), { start: '2026-05-25', end: '2026-05-31' });
+test('previousCycleWeek: less than 7 days into cycle → null (no completed week yet)', () => {
+  // Today = May 30, cycle start = May 25. Only 5 full days in. Not even week 1 done.
+  assert.strictEqual(previousCycleWeek({ cycleStart: '2026-05-25', today: '2026-05-30' }), null);
 });
 
-test('previousMondaySunday: month boundary 2026-07-01 (Wed) crosses back into June', () => {
-  assert.deepStrictEqual(previousMondaySunday('2026-07-01'), { start: '2026-06-22', end: '2026-06-28' });
+test('previousCycleWeek: on the exact end-of-week-1 day → week 1 is the last completed', () => {
+  // Cycle May 25. May 31 is day 6, end of week 1. Today May 31 → week 1 just completed.
+  assert.deepStrictEqual(
+    previousCycleWeek({ cycleStart: '2026-05-25', today: '2026-05-31' }),
+    { start: '2026-05-25', end: '2026-05-31' }
+  );
 });
 
-// --- computeLastWeek: per-day aggregation, rent excluded, monthly projection ---
+// --- computeLastWeek: per-day aggregation across the cycle-anchored week ---
 
-test('computeLastWeek: aggregates per-day, drops rent + excluded + income, projects monthly', () => {
+test('computeLastWeek: cycle May 25, today Jun 8 → aggregates Jun 1-7 (week 2)', () => {
   const pages = [
     mkPage('2026-06-01', 1000),
     mkPage('2026-06-02', 500),
@@ -221,8 +233,9 @@ test('computeLastWeek: aggregates per-day, drops rent + excluded + income, proje
     mkPage('2026-06-05', 15000, { category: 'Rent' }), // dropped
     mkPage('2026-06-06', 200, { excluded: true }),     // dropped
     mkPage('2026-06-06', 500, { type: 'Income' }),     // dropped
+    mkPage('2026-05-31', 9999),                         // pre-window, dropped
   ];
-  const r = computeLastWeek({ pages, today: '2026-06-10' });
+  const r = computeLastWeek({ pages, cycleStart: '2026-05-25', today: '2026-06-08' });
   assert.strictEqual(r.startDate, '2026-06-01');
   assert.strictEqual(r.endDate, '2026-06-07');
   assert.strictEqual(r.days.length, 7);
@@ -231,11 +244,58 @@ test('computeLastWeek: aggregates per-day, drops rent + excluded + income, proje
   assert.strictEqual(r.projectedMonthly, Math.round((4800 * 30) / 7));
 });
 
-test('computeLastWeek: empty pages → total 0 and projection 0, still 7 days', () => {
-  const r = computeLastWeek({ pages: [], today: '2026-06-10' });
-  assert.strictEqual(r.total, 0);
-  assert.strictEqual(r.projectedMonthly, 0);
-  assert.strictEqual(r.days.length, 7);
+test('computeLastWeek: returns null when no full cycle-week has elapsed yet', () => {
+  const r = computeLastWeek({ pages: [], cycleStart: '2026-05-25', today: '2026-05-28' });
+  assert.strictEqual(r, null);
+});
+
+// --- computeSavingsAdvice: target-aware weekly cap and surplus projection ---
+
+test('computeSavingsAdvice: 17k net, 10k target, 28 days left, 1k/wk pace → max 1.75k/wk, +3k surplus', () => {
+  // income=20k, spent=3k → net=17k. Target=10k → 7k available.
+  // Days left ~28 (4 weeks). Max = 7000/4 = 1750.
+  // At 1000/wk for 4 weeks → spend 4000 more → end-net = 17000 - 4000 = 13000.
+  // Surplus = 13000 - 10000 = 3000.
+  const r = computeSavingsAdvice({
+    income: 20000,
+    totalExpense: 3000,
+    savingsTarget: 10000,
+    endDate: '2026-06-30',
+    today: '2026-06-02',
+    lastWeekTotal: 1000,
+  });
+  assert.strictEqual(r.currentNet, 17000);
+  assert.strictEqual(r.availableToSpend, 7000);
+  assert.strictEqual(r.daysLeft, 28);
+  assert.strictEqual(r.maxWeeklySpend, 1750);
+  assert.strictEqual(r.projectedSavingsAtCurrentPace, 13000);
+  assert.strictEqual(r.surplusOverTarget, 3000);
+  assert.strictEqual(r.cycleEnded, false);
+});
+
+test('computeSavingsAdvice: over-budget pace flags surplus < 0', () => {
+  const r = computeSavingsAdvice({
+    income: 20000,
+    totalExpense: 3000,
+    savingsTarget: 10000,
+    endDate: '2026-06-30',
+    today: '2026-06-02',
+    lastWeekTotal: 2500, // way over 1750/wk cap
+  });
+  assert.strictEqual(r.surplusOverTarget < 0, true);
+});
+
+test('computeSavingsAdvice: cycle ended → maxWeeklySpend null, cycleEnded true', () => {
+  const r = computeSavingsAdvice({
+    income: 20000,
+    totalExpense: 3000,
+    savingsTarget: 10000,
+    endDate: '2026-05-30',
+    today: '2026-06-10',
+    lastWeekTotal: 1000,
+  });
+  assert.strictEqual(r.cycleEnded, true);
+  assert.strictEqual(r.maxWeeklySpend, null);
 });
 
 // --- computeDailyTotals: per-day over an arbitrary inclusive range ---

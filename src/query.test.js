@@ -38,9 +38,14 @@ test('matchTransactions: sorted by date desc', () => {
   assert.deepStrictEqual(r.map(x => x.name), ['mcd b', 'mcd c', 'mcd a']);
 });
 
-test('matchTransactions: empty keyword returns empty', () => {
+test('matchTransactions: empty keyword returns ALL pages (open-question support)', () => {
+  const pages = [mk('mcd', '', 1, '2026-06-01'), mk('pizza', '', 2, '2026-06-02')];
+  assert.strictEqual(matchTransactions(pages, '').length, 2);
+});
+
+test('matchTransactions: whitespace-only keyword treated as empty (returns all)', () => {
   const pages = [mk('mcd', '', 1, '2026-06-01')];
-  assert.strictEqual(matchTransactions(pages, '').length, 0);
+  assert.strictEqual(matchTransactions(pages, '   ').length, 1);
 });
 
 test('matchTransactions: includes excluded rows but tags them', () => {
