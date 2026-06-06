@@ -132,7 +132,6 @@ export function formatSummaryOnly(summary, title, userConfig = {}, dateCtx = {},
           : `${advice.daysLeft} days`;
         text += `━━━━━━━━━━━━━━━━━━━━\n`;
         text += `🎯 Savings plan:\n`;
-        text += `  Target: ${formatCurrency(userConfig.savingsTarget)} · Net so far: ${formatCurrency(advice.currentNet)}\n`;
 
         if (advice.availableToSpend < 0) {
           text += `  ⛔ Already ${formatCurrency(-advice.availableToSpend)} past your target — nothing left to spend this cycle.\n`;

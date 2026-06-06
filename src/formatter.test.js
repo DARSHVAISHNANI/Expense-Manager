@@ -136,9 +136,15 @@ test('formatSummaryOnly: includes savings plan recommendation when target + last
   };
   const out = formatSummaryOnly(summary, 'Test Summary', userConfig, dateCtx, lastWeek);
   assert.ok(out.includes('Savings plan'));
-  assert.ok(out.includes('Target: ₹5,000'));
   assert.ok(out.includes('Max ₹1,333/week to hit ₹5,000'));
   assert.ok(out.match(/save an extra ₹[\d,]+ on top of target/));
+
+  // The plan block should NOT repeat target/net — those already appear in the
+  // Savings Goal block right after Net at the top.
+  const planIdx = out.indexOf('Savings plan');
+  const planBlock = out.slice(planIdx);
+  assert.ok(!planBlock.includes('Net so far'));
+  assert.ok(!/Target: ₹/.test(planBlock));
 });
 
 test('formatSummaryOnly: warns to slow down when last-week pace is over the cap', () => {
