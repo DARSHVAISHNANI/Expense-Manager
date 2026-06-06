@@ -1,6 +1,12 @@
 // Pure calculation helpers — no Notion, no Telegram, fully unit-testable.
 
+import { isCountableExpense } from './notion.js';
+
 const DAY_MS = 24 * 60 * 60 * 1000;
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+const formatDate = (dt) =>
+  `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
 
 /**
  * Back-solve the stored opening balance from the balance the user typed RIGHT NOW.
@@ -101,4 +107,74 @@ export function computeWeeklyAllowance({ income, totalExpense, savingsTarget, st
     overBudget: remainingAllowance < 0,
     cycleEnded: remainingDays <= 0,
   };
+}
+
+/**
+ * Most recently FULLY-completed Monday–Sunday window relative to `today`.
+ * If today is Sunday, returns the week that ended LAST Sunday (a fully complete
+ * prior week — not the one ending today).
+ */
+export function previousMondaySunday(today) {
+  const [y, m, d] = today.split('-').map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  const dow = date.getUTCDay(); // Sun=0 .. Sat=6
+  // Days back to the previous Sunday (inclusive). If today is Sunday, skip 7 days
+  // so we get the previous week, not the one ending today.
+  const daysToPrevSunday = dow === 0 ? 7 : dow;
+  const end = new Date(date.getTime() - daysToPrevSunday * DAY_MS);
+  const start = new Date(end.getTime() - 6 * DAY_MS);
+  return { start: formatDate(start), end: formatDate(end) };
+}
+
+/**
+ * Aggregate per-day spending across the most-recent fully-completed Mon–Sun.
+ * Filters out non-expense, excluded, and rent rows (uses isCountableExpense).
+ *
+ * @returns {{ startDate:string, endDate:string, days:Array<{date,weekday,total}>, total:number, projectedMonthly:number }}
+ */
+export function computeLastWeek({ pages, today }) {
+  const { start, end } = previousMondaySunday(today);
+  const startMs = Date.parse(`${start}T00:00:00Z`);
+
+  // Pre-seed all 7 days at zero so missing days still appear.
+  const days = Array.from({ length: 7 }, (_, i) => {
+    const dt = new Date(startMs + i * DAY_MS);
+    return { date: formatDate(dt), weekday: WEEKDAYS[dt.getUTCDay()], total: 0 };
+  });
+
+  for (const p of pages) {
+    if (!isCountableExpense(p)) continue;
+    const pageDate = p.properties?.Date?.date?.start;
+    const amount = p.properties?.Amount?.number || 0;
+    const day = days.find(d => d.date === pageDate);
+    if (day) day.total += amount;
+  }
+
+  const total = days.reduce((s, d) => s + d.total, 0);
+  const projectedMonthly = Math.round((total * 30) / 7);
+  return { startDate: start, endDate: end, days, total, projectedMonthly };
+}
+
+/**
+ * Per-day expense totals over an inclusive date range. Same filter as the
+ * last-week view (rent + excluded + non-expense dropped).
+ */
+export function computeDailyTotals(pages, startDate, endDate) {
+  const startMs = Date.parse(`${startDate}T00:00:00Z`);
+  const endMs = Date.parse(`${endDate}T00:00:00Z`);
+  const numDays = Math.round((endMs - startMs) / DAY_MS) + 1;
+
+  const days = Array.from({ length: numDays }, (_, i) => {
+    const dt = new Date(startMs + i * DAY_MS);
+    return { date: formatDate(dt), weekday: WEEKDAYS[dt.getUTCDay()], total: 0 };
+  });
+
+  for (const p of pages) {
+    if (!isCountableExpense(p)) continue;
+    const pageDate = p.properties?.Date?.date?.start;
+    const amount = p.properties?.Amount?.number || 0;
+    const day = days.find(x => x.date === pageDate);
+    if (day) day.total += amount;
+  }
+  return days;
 }

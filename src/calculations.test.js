@@ -1,7 +1,52 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { backSolveInit, computeProjection, computeWeeklyAllowance } from './calculations.js';
+import { backSolveInit, computeProjection, computeWeeklyAllowance, previousMondaySunday, computeLastWeek, computeDailyTotals } from './calculations.js';
+import { isCountableExpense } from './notion.js';
+
+const mkPage = (date, amount, { category = 'Food', type = 'Expense', excluded = false } = {}) => ({
+  properties: {
+    Date: { date: { start: date } },
+    Amount: { number: amount },
+    Category: { select: { name: category } },
+    Type: { select: { name: type } },
+    Exclude: { checkbox: excluded },
+  },
+});
+
+// --- isCountableExpense: shared filter for what counts toward spending totals ---
+
+const makePage = ({ type = 'Expense', category = 'Food', excluded = false } = {}) => ({
+  properties: {
+    Type: { select: { name: type } },
+    Category: { select: { name: category } },
+    Exclude: { checkbox: excluded },
+  },
+});
+
+test('isCountableExpense: includes a plain expense', () => {
+  assert.strictEqual(isCountableExpense(makePage()), true);
+});
+
+test('isCountableExpense: skips income', () => {
+  assert.strictEqual(isCountableExpense(makePage({ type: 'Income' })), false);
+});
+
+test('isCountableExpense: skips transfers', () => {
+  assert.strictEqual(isCountableExpense(makePage({ type: 'Transfer' })), false);
+});
+
+test('isCountableExpense: skips excluded rows', () => {
+  assert.strictEqual(isCountableExpense(makePage({ excluded: true })), false);
+});
+
+test('isCountableExpense: skips rent by default', () => {
+  assert.strictEqual(isCountableExpense(makePage({ category: 'Rent' })), false);
+});
+
+test('isCountableExpense: includes rent when excludeRent=false', () => {
+  assert.strictEqual(isCountableExpense(makePage({ category: 'Rent' }), { excludeRent: false }), true);
+});
 
 // --- S-1: Back-solve the stored opening balance from a typed CURRENT balance ---
 // Invariant we care about: storedInit + delta === typedCurrentBalance
@@ -140,4 +185,74 @@ test('computeWeeklyAllowance: flags cycleEnded and gives no weekly figure once t
   assert.equal(r.remainingDays, 0);
   assert.equal(r.cycleEnded, true);
   assert.equal(r.weeklyAllowance, null);
+});
+
+// --- previousMondaySunday: returns the most recent FULLY-completed Mon-Sun ---
+
+test('previousMondaySunday: Wednesday 2026-06-10 returns prev Mon-Sun (Jun 1-7)', () => {
+  assert.deepStrictEqual(previousMondaySunday('2026-06-10'), { start: '2026-06-01', end: '2026-06-07' });
+});
+
+test('previousMondaySunday: Monday 2026-06-08 returns prev Mon-Sun (Jun 1-7)', () => {
+  assert.deepStrictEqual(previousMondaySunday('2026-06-08'), { start: '2026-06-01', end: '2026-06-07' });
+});
+
+test('previousMondaySunday: Sunday 2026-06-07 returns the WEEK BEFORE (May 25-31)', () => {
+  // Sunday — the current week ends today but it's only just "completed", we want
+  // the previous fully-completed window.
+  assert.deepStrictEqual(previousMondaySunday('2026-06-07'), { start: '2026-05-25', end: '2026-05-31' });
+});
+
+test('previousMondaySunday: month boundary 2026-07-01 (Wed) crosses back into June', () => {
+  assert.deepStrictEqual(previousMondaySunday('2026-07-01'), { start: '2026-06-22', end: '2026-06-28' });
+});
+
+// --- computeLastWeek: per-day aggregation, rent excluded, monthly projection ---
+
+test('computeLastWeek: aggregates per-day, drops rent + excluded + income, projects monthly', () => {
+  const pages = [
+    mkPage('2026-06-01', 1000),
+    mkPage('2026-06-02', 500),
+    mkPage('2026-06-03', 700),
+    mkPage('2026-06-03', 300), // same day, additive
+    mkPage('2026-06-05', 450),
+    mkPage('2026-06-06', 1200),
+    mkPage('2026-06-07', 650),
+    mkPage('2026-06-05', 15000, { category: 'Rent' }), // dropped
+    mkPage('2026-06-06', 200, { excluded: true }),     // dropped
+    mkPage('2026-06-06', 500, { type: 'Income' }),     // dropped
+  ];
+  const r = computeLastWeek({ pages, today: '2026-06-10' });
+  assert.strictEqual(r.startDate, '2026-06-01');
+  assert.strictEqual(r.endDate, '2026-06-07');
+  assert.strictEqual(r.days.length, 7);
+  assert.deepStrictEqual(r.days.map(d => d.total), [1000, 500, 1000, 0, 450, 1200, 650]);
+  assert.strictEqual(r.total, 4800);
+  assert.strictEqual(r.projectedMonthly, Math.round((4800 * 30) / 7));
+});
+
+test('computeLastWeek: empty pages → total 0 and projection 0, still 7 days', () => {
+  const r = computeLastWeek({ pages: [], today: '2026-06-10' });
+  assert.strictEqual(r.total, 0);
+  assert.strictEqual(r.projectedMonthly, 0);
+  assert.strictEqual(r.days.length, 7);
+});
+
+// --- computeDailyTotals: per-day over an arbitrary inclusive range ---
+
+test('computeDailyTotals: per-day totals, fills missing days with 0, drops rent', () => {
+  const pages = [
+    mkPage('2026-06-05', 100),
+    mkPage('2026-06-05', 200),
+    mkPage('2026-06-07', 50),
+    mkPage('2026-06-07', 5000, { category: 'Rent' }), // dropped
+  ];
+  const r = computeDailyTotals(pages, '2026-06-05', '2026-06-08');
+  assert.deepStrictEqual(r.map(d => [d.date, d.total]), [
+    ['2026-06-05', 300],
+    ['2026-06-06', 0],
+    ['2026-06-07', 50],
+    ['2026-06-08', 0],
+  ]);
+  assert.ok(r.every(d => typeof d.weekday === 'string'));
 });

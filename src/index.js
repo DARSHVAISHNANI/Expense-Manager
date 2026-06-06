@@ -11,8 +11,13 @@ app.get('/', (req, res) => {
   res.send('🤖 Finance Bot is awake and running!');
 });
 
-app.listen(port, () => {
+app.listen(port, async () => {
   console.log(`🌐 Dummy Web server listening on port ${port}`);
   console.log('🤖 Finance Bot starting...');
-  startBot();
+  try {
+    await startBot();
+  } catch (e) {
+    console.error('Failed to start bot:', e.message);
+    process.exit(1);
+  }
 });
