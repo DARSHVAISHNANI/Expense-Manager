@@ -9,7 +9,7 @@ const formatCurrency = (amount) => {
 /**
  * Formats the success message when a new entry is added.
  */
-export function formatAddedEntry(parsedData, summary, displayTitle, userConfig = {}, dateCtx = {}) {
+export function formatAddedEntry(parsedData, summary, displayTitle, userConfig = {}, dateCtx = {}, lastWeek = null) {
   const dateObj = new Date(parsedData.date);
   const formattedDate = dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
 
@@ -26,16 +26,36 @@ export function formatAddedEntry(parsedData, summary, displayTitle, userConfig =
   text += `💸 ${formatCurrency(parsedData.amount)}  •  📂 ${parsedData.category}\n`;
   text += `📅 ${formattedDate}\n`;
 
-  // FIX: Pass the displayTitle directly to formatSummaryOnly instead of month/year
-  text += `\n${formatSummaryOnly(summary, displayTitle, userConfig, dateCtx)}`;
+  text += `\n${formatSummaryOnly(summary, displayTitle, userConfig, dateCtx, lastWeek)}`;
 
+  return text;
+}
+
+/**
+ * Multi-entry success message. Single entry delegates to formatAddedEntry
+ * so today's detailed UX is preserved for the common case.
+ */
+export function formatAddedEntries(entries, summary, displayTitle, userConfig = {}, dateCtx = {}, lastWeek = null) {
+  if (entries.length === 1) {
+    return formatAddedEntry(entries[0], summary, displayTitle, userConfig, dateCtx, lastWeek);
+  }
+
+  let text = `✅ Added ${entries.length} entries:\n`;
+  text += `━━━━━━━━━━━━━━━━━━━━\n`;
+  let batchTotal = 0;
+  for (const e of entries) {
+    text += `• ${e.name} · ${formatCurrency(e.amount)} · ${e.payment} · ${e.category}\n`;
+    if (e.type === 'Expense') batchTotal += e.amount;
+  }
+  text += `Batch total: ${formatCurrency(batchTotal)}\n\n`;
+  text += formatSummaryOnly(summary, displayTitle, userConfig, dateCtx, lastWeek);
   return text;
 }
 
 /**
  * Formats the message for the /summary command.
  */
-export function formatSummaryOnly(summary, title, userConfig = {}, dateCtx = {}) {
+export function formatSummaryOnly(summary, title, userConfig = {}, dateCtx = {}, lastWeek = null) {
 
   const displayIncome = userConfig.income > 0 ? userConfig.income : summary.totalIncome;
   const currentSavings = displayIncome - summary.totalExpense;
@@ -70,6 +90,18 @@ export function formatSummaryOnly(summary, title, userConfig = {}, dateCtx = {})
   text += `🏛️ SBI: ${formatCurrency(sbiLive)}\n`;
   text += `💵 Cash: ${formatCurrency(cashLive)}\n`;
   text += `🏦 Total Cash: ${formatCurrency(totalCash)}\n`;
+
+  // 1a. LAST WEEK PER-DAY BREAKDOWN (rent excluded). Skipped on zero-spend weeks.
+  if (lastWeek && lastWeek.total > 0) {
+    text += `━━━━━━━━━━━━━━━━━━━━\n`;
+    text += `📅 Last Week (Mon–Sun, excl. rent):\n`;
+    for (const d of lastWeek.days) {
+      text += `  ${d.weekday} ${d.date.slice(5)}  ${formatCurrency(d.total)}\n`;
+    }
+    text += `  ─────────────────\n`;
+    text += `  Total: ${formatCurrency(lastWeek.total)}\n`;
+    text += `  Projected monthly (×30/7): ${formatCurrency(lastWeek.projectedMonthly)}\n`;
+  }
 
   // 1b. WEEKLY BURN RATE + END-OF-CYCLE PROJECTION (needs the real cycle dates)
   if (dateCtx.startDate && dateCtx.endDate && dateCtx.today) {
@@ -133,6 +165,57 @@ export function formatSummaryOnly(summary, title, userConfig = {}, dateCtx = {})
     text += `\n*(Type /setup to add budget limits)*`;
   }
 
+  return text;
+}
+
+const BAR_FILL = '█';
+const BAR_EMPTY = '░';
+
+/**
+ * ASCII bar chart of daily spend. Bars scale to the window's max day so the
+ * rhythm of high/low days is visible at a glance.
+ */
+export function renderDailyChart(days, { width = 12 } = {}) {
+  const total = days.reduce((s, d) => s + d.total, 0);
+  if (total === 0) {
+    return `📊 Daily Spend (${days.length} days, excl. rent)\nNo spend in this window.`;
+  }
+  const max = Math.max(...days.map(d => d.total));
+  const peak = days.reduce((best, d) => (d.total > best.total ? d : best), days[0]);
+
+  let text = `📊 Daily Spend (${days.length} days, excl. rent)\n`;
+  for (const d of days) {
+    const filled = max > 0 ? Math.round((d.total / max) * width) : 0;
+    const bar = BAR_FILL.repeat(filled) + BAR_EMPTY.repeat(width - filled);
+    text += `${d.date.slice(5)} ${d.weekday} ${bar}  ${formatCurrency(d.total)}\n`;
+  }
+  const avg = Math.round(total / days.length);
+  text += `─────────────────────────────\n`;
+  text += `Total: ${formatCurrency(total)} · Avg: ${formatCurrency(avg)}/day · Peak: ${peak.date.slice(5)} ${formatCurrency(peak.total)}`;
+  return text;
+}
+
+/**
+ * Renders a /query response. Total is summed across non-excluded Expense rows
+ * only — Income and excluded rows are shown but don't add to the total.
+ */
+export function formatQueryResult(matches, keyword, startDate, endDate) {
+  let text = `🔎 "${keyword}" · ${startDate} → ${endDate}\n`;
+  if (matches.length === 0) {
+    text += `No matches.`;
+    return text;
+  }
+  const total = matches
+    .filter(m => m.type === 'Expense' && !m.excluded)
+    .reduce((s, m) => s + m.amount, 0);
+  text += `Matches: ${matches.length} entries · Total spent: ${formatCurrency(total)}\n`;
+  text += `Recent:\n`;
+  const top = matches.slice(0, 5);
+  for (const m of top) {
+    const tag = m.excluded ? ' (excluded)' : m.type !== 'Expense' ? ` (${m.type})` : '';
+    text += `  ${m.date.slice(5)} ${m.name} · ${formatCurrency(m.amount)} · ${m.payment}${tag}\n`;
+  }
+  if (matches.length > 5) text += `  ... +${matches.length - 5} more\n`;
   return text;
 }
 

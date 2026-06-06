@@ -4,9 +4,31 @@ import 'dotenv/config';
 
 import { parseTransactionText } from './parser.js';
 import { transcribeAudio } from './transcriber.js';
-import { insertEntry, getDateRangeSummary } from './notion.js';
-import { formatAddedEntry, formatSummaryOnly, formatError } from './formatter.js';
-import { backSolveInit } from './calculations.js';
+import { insertEntry, getDateRangeSummary, getDateRangePages, loadConfig, saveConfig } from './notion.js';
+import { formatAddedEntry, formatAddedEntries, formatSummaryOnly, formatError, renderDailyChart, formatQueryResult } from './formatter.js';
+import { backSolveInit, previousMondaySunday, computeLastWeek, computeDailyTotals } from './calculations.js';
+import { parseQuery, matchTransactions } from './query.js';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const fmtDateUTC = (ms) => {
+  const dt = new Date(ms);
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+};
+
+/**
+ * Fetch and aggregate the most-recently-completed Mon–Sun. Used by /summary and
+ * post-entry success. Returns null on failure so callers can degrade gracefully.
+ */
+async function fetchLastWeek(today) {
+  try {
+    const { start, end } = previousMondaySunday(today);
+    const pages = await getDateRangePages(start, end);
+    return computeLastWeek({ pages, today });
+  } catch (e) {
+    console.error('Failed to fetch last-week data:', e.message);
+    return null;
+  }
+}
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const allowedUserId = parseInt(process.env.ALLOWED_TELEGRAM_USER_ID, 10);
@@ -58,8 +80,20 @@ const isAllowed = (msg) => {
 };
 
 // Start the bot exported function
-export function startBot() {
+export async function startBot() {
   console.log('🟢 Bot is actively listening for messages...');
+
+  try {
+    const saved = await loadConfig();
+    if (saved) {
+      Object.assign(userConfig, saved);
+      console.log(`✅ Loaded saved config (cycle ${saved.startDate || '?'} → ${saved.endDate || '?'})`);
+    } else {
+      console.log('ℹ️ No saved config found — run /setup to initialize.');
+    }
+  } catch (e) {
+    console.error('Failed to load config:', e.message);
+  }
 
   // --- COMMAND: /start ---
   bot.onText(/^\/start$/, (msg) => {
@@ -79,7 +113,73 @@ export function startBot() {
   bot.onText(/^\/setup$/, (msg) => {
     if (!isAllowed(msg)) return;
     setupStep = 1; // Start the wizard
-    bot.sendMessage(msg.chat.id, "🛠️ Let's set up your custom billing cycle and Goals!\n\n**Question 1:** What is the START DATE for your cycle? (Format: YYYY-MM-DD, e.g., 2026-04-24)");
+    bot.sendMessage(msg.chat.id, "🛠️ Let's set up your billing cycle. Pick one:", {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '📅 This Month', callback_data: 'cycle:this_month' },
+          { text: '📅 Next 30 Days', callback_data: 'cycle:next_30' },
+          { text: '📅 Custom', callback_data: 'cycle:custom' },
+        ]],
+      },
+    });
+  });
+
+  // --- CALLBACK: cycle:* buttons from /setup Q1 ---
+  bot.on('callback_query', async (cb) => {
+    if (cb.from.id !== allowedUserId) return;
+    const data = cb.data || '';
+    if (!data.startsWith('cycle:')) return;
+    if (setupStep !== 1) {
+      return bot.answerCallbackQuery(cb.id, { text: 'Run /setup first.' });
+    }
+    bot.answerCallbackQuery(cb.id);
+
+    const today = getISTToday();
+    const todayMs = Date.parse(`${today}T00:00:00Z`);
+
+    if (data === 'cycle:this_month') {
+      const [y, m] = today.split('-').map(Number);
+      const first = `${y}-${String(m).padStart(2, '0')}-01`;
+      const lastDt = new Date(Date.UTC(y, m, 0)); // day 0 of next month = last day of this month
+      const last = fmtDateUTC(lastDt.getTime());
+      userConfig.startDate = first;
+      userConfig.endDate = last;
+      setupStep = 3;
+      return bot.sendMessage(cb.message.chat.id, `✅ Cycle set: ${first} → ${last}\n\n**Question 3:** What is your expected total Monthly Income? (Just type a number)`);
+    }
+    if (data === 'cycle:next_30') {
+      const start = today;
+      const end = fmtDateUTC(todayMs + 29 * DAY_MS);
+      userConfig.startDate = start;
+      userConfig.endDate = end;
+      setupStep = 3;
+      return bot.sendMessage(cb.message.chat.id, `✅ Cycle set: ${start} → ${end}\n\n**Question 3:** What is your expected total Monthly Income? (Just type a number)`);
+    }
+    if (data === 'cycle:custom') {
+      // Fall through to the existing typed-date path.
+      return bot.sendMessage(cb.message.chat.id, "**Question 1:** What is the START DATE for your cycle? (Format: YYYY-MM-DD, e.g., 2026-04-24)");
+    }
+  });
+
+  // --- COMMAND: /set <field> <value> ---
+  const SET_FIELDS = ['income', 'rentLimit', 'electricityLimit', 'groceriesLimit', 'foodLimit', 'billsLimit', 'travelLimit', 'savingsTarget'];
+  bot.onText(/^\/set(?:\s+(\S+)\s+(.+))?$/, async (msg, match) => {
+    if (!isAllowed(msg)) return;
+    const field = match[1];
+    const rawVal = match[2];
+    if (!field || rawVal === undefined) {
+      return bot.sendMessage(msg.chat.id, `❌ Usage: /set <field> <value>\nAllowed fields: ${SET_FIELDS.join(', ')}`);
+    }
+    if (!SET_FIELDS.includes(field)) {
+      return bot.sendMessage(msg.chat.id, `❌ Unknown field "${field}". Allowed: ${SET_FIELDS.join(', ')}`);
+    }
+    const value = parseInt(String(rawVal).replace(/,/g, ''), 10);
+    if (!Number.isFinite(value)) {
+      return bot.sendMessage(msg.chat.id, '❌ Value must be a number.');
+    }
+    userConfig[field] = value;
+    try { await saveConfig(userConfig); } catch (e) { console.error('saveConfig failed:', e.message); }
+    bot.sendMessage(msg.chat.id, `✅ ${field} = ${value.toLocaleString('en-IN')}`);
   });
 
   // --- COMMAND: /summary ---
@@ -113,13 +213,61 @@ export function startBot() {
         return bot.sendMessage(msg.chat.id, "📅 No active cycle yet. Please run /setup first to set your billing cycle and balances.");
       }
 
-      // Fetch the data and format it!
       const summary = await getDateRangeSummary(startDate, endDate);
-      const dateCtx = { startDate, endDate, today: getISTToday() };
-      bot.sendMessage(msg.chat.id, formatSummaryOnly(summary, displayTitle, userConfig, dateCtx));
+      const today = getISTToday();
+      const dateCtx = { startDate, endDate, today };
+      const lastWeek = await fetchLastWeek(today);
+      bot.sendMessage(msg.chat.id, formatSummaryOnly(summary, displayTitle, userConfig, dateCtx, lastWeek));
 
     } catch (error) {
       bot.sendMessage(msg.chat.id, formatError('Failed to fetch summary. Check your dates!'));
+    }
+  });
+
+  // --- COMMAND: /daily [N] — N-day spending chart, default 14 ---
+  bot.onText(/^\/daily(?:\s+(\d+))?$/, async (msg, match) => {
+    if (!isAllowed(msg)) return;
+    try {
+      bot.sendChatAction(msg.chat.id, 'typing');
+      const n = match[1] ? parseInt(match[1], 10) : 14;
+      if (!Number.isFinite(n) || n < 1 || n > 60) {
+        return bot.sendMessage(msg.chat.id, '❌ /daily takes a number of days between 1 and 60. Default is 14.');
+      }
+      const today = getISTToday();
+      const endMs = Date.parse(`${today}T00:00:00Z`);
+      const startMs = endMs - (n - 1) * DAY_MS;
+      const startDate = fmtDateUTC(startMs);
+      const endDate = fmtDateUTC(endMs);
+      const pages = await getDateRangePages(startDate, endDate);
+      const days = computeDailyTotals(pages, startDate, endDate);
+      bot.sendMessage(msg.chat.id, renderDailyChart(days));
+    } catch (error) {
+      bot.sendMessage(msg.chat.id, formatError('Failed to fetch daily chart.'));
+    }
+  });
+
+  // --- COMMAND: /query <natural-language question> ---
+  bot.onText(/^\/query(?:\s+(.+))?$/, async (msg, match) => {
+    if (!isAllowed(msg)) return;
+    const question = match[1]?.trim();
+    if (!question) {
+      return bot.sendMessage(msg.chat.id, '❌ Ask something like: /query total mcd this month');
+    }
+    try {
+      bot.sendChatAction(msg.chat.id, 'typing');
+      const today = getISTToday();
+      const defaults = userConfig.startDate && userConfig.endDate
+        ? { startDate: userConfig.startDate, endDate: userConfig.endDate }
+        : { startDate: today, endDate: today };
+      const { keyword, startDate, endDate } = await parseQuery(question, today, defaults);
+      if (!keyword) {
+        return bot.sendMessage(msg.chat.id, '❌ I need a keyword to search for. Try: /query mcd this month');
+      }
+      const pages = await getDateRangePages(startDate, endDate);
+      const matches = matchTransactions(pages, keyword);
+      bot.sendMessage(msg.chat.id, formatQueryResult(matches, keyword, startDate, endDate));
+    } catch (error) {
+      bot.sendMessage(msg.chat.id, formatError(`Query failed: ${error.message}`));
     }
   });
 
@@ -211,12 +359,14 @@ export function startBot() {
               userConfig.hdfcInit = backSolveInit(userConfig.hdfcCurrent, deltas['HDFC'] || 0);
               userConfig.sbiInit = backSolveInit(userConfig.sbiCurrent, deltas['SBI'] || 0);
               userConfig.cashInit = backSolveInit(userConfig.cashCurrent, deltas['Cash'] || 0);
+              try { await saveConfig(userConfig); } catch (e) { console.error('saveConfig failed:', e.message); }
               return bot.sendMessage(msg.chat.id, `🎉 Setup Complete! Your cycle is set from ${userConfig.startDate} to ${userConfig.endDate}. Live balances are reconciled with your existing transactions. Type /summary to see your dashboard.`);
             } catch (error) {
               // Couldn't reach Notion to reconcile — store typed values as-is and warn.
               userConfig.hdfcInit = userConfig.hdfcCurrent;
               userConfig.sbiInit = userConfig.sbiCurrent;
               userConfig.cashInit = userConfig.cashCurrent;
+              try { await saveConfig(userConfig); } catch (e) { console.error('saveConfig failed:', e.message); }
               return bot.sendMessage(msg.chat.id, `🎉 Setup saved (cycle ${userConfig.startDate} to ${userConfig.endDate}), but I couldn't reach Notion to reconcile your live balances against existing transactions. Please re-run /setup once your connection is back so the numbers stay accurate.`);
             }
           }
@@ -238,32 +388,33 @@ export function startBot() {
         console.log(`🎙️ Transcribed: "${textToParse}"`);
       }
 
-      // 4. Parse the text using Groq LLaMA 3
-      const parsedData = await parseTransactionText(textToParse);
+      const { entries } = await parseTransactionText(textToParse);
 
-      // 5. Insert into Notion
-      await insertEntry(parsedData);
-
-      // 6. Wait 2500ms to give Notion time to index the new entry
-      await new Promise(resolve => setTimeout(resolve, 2500));
-
-      // 7. No active /setup cycle: the entry is saved, but we can't show a cycle
-      //    dashboard without dates. Confirm the save and nudge them to run /setup.
-      if (!userConfig.startDate || !userConfig.endDate) {
-        return bot.sendMessage(msg.chat.id, `✅ Saved: ${parsedData.name} (₹${parsedData.amount.toLocaleString('en-IN')}).\n\n📅 Run /setup to set your billing cycle and see your full dashboard.`);
+      for (const entry of entries) {
+        await insertEntry(entry);
       }
 
-      // 8. Use the saved /setup cycle dates.
+      await new Promise(resolve => setTimeout(resolve, 2500));
+
+      if (!userConfig.startDate || !userConfig.endDate) {
+        const lines = entries
+          .map(e => `• ${e.name} (₹${e.amount.toLocaleString('en-IN')})`)
+          .join('\n');
+        return bot.sendMessage(
+          msg.chat.id,
+          `✅ Saved ${entries.length} ${entries.length === 1 ? 'entry' : 'entries'}:\n${lines}\n\n📅 Run /setup to set your billing cycle and see your full dashboard.`
+        );
+      }
+
       const startDate = userConfig.startDate;
       const endDate = userConfig.endDate;
       const displayTitle = `${startDate} to ${endDate} Summary`;
 
-      // 9. Fetch the newly updated summary data
       const summary = await getDateRangeSummary(startDate, endDate);
-
-      // 10. Send the success message!
-      const dateCtx = { startDate, endDate, today: getISTToday() };
-      bot.sendMessage(msg.chat.id, formatAddedEntry(parsedData, summary, displayTitle, userConfig, dateCtx));
+      const today = getISTToday();
+      const dateCtx = { startDate, endDate, today };
+      const lastWeek = await fetchLastWeek(today);
+      bot.sendMessage(msg.chat.id, formatAddedEntries(entries, summary, displayTitle, userConfig, dateCtx, lastWeek));
 
     } catch (error) {
       bot.sendMessage(msg.chat.id, formatError(error.message));
